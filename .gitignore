@@ -1,0 +1,50 @@
+# Secrets: API keys (Seats.aero, cash-fare API, notification service), tokens
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.*
+config.local.*
+
+# Local data: SQLite database (trips, balances, alert history)
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+.AppleDouble
+.Spotlight-V100
+.Trashes
+Thumbs.db
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Temp / scratch
+tmp/
+*.tmp

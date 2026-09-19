@@ -1,0 +1,7 @@
+# Runtime
+requests        # HTTP client for Seats.aero and the cash-fare API
+python-dotenv   # load API keys from .env
+feedparser      # RSS parsing for buy-miles promo tracking
+
+# Development
+pytest

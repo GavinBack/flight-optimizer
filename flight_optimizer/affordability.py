@@ -66,6 +66,11 @@ class TripOption:
     def total_miles(self) -> int:
         return sum(i.total_miles for i in self.itineraries)
 
+    @property
+    def self_transfers(self) -> int:
+        """Total connections across all directions that would be separate bookings."""
+        return sum(i.self_transfers for i in self.itineraries)
+
 
 def assess(itineraries: Sequence[Itinerary], balances: dict[str, int]) -> Affordability:
     """Can `balances` pay for all of these itineraries together?"""
@@ -112,13 +117,18 @@ def assess(itineraries: Sequence[Itinerary], balances: dict[str, int]) -> Afford
 def _sort_key(option: TripOption) -> tuple:
     a = option.affordability
     if a.affordable:
-        return (0, option.total_miles, a.capital_one_used)
+        # Fewest self-transfers first: one ticket means bags are checked through and
+        # the airline covers a missed connection. Then cheapest.
+        return (0, option.self_transfers, option.total_miles, a.capital_one_used)
     return (1, a.total_shortfall, option.total_miles)
 
 
 def rank_trip(result: TripSearchResult, balances: dict[str, int]) -> list[TripOption]:
-    """Every full-trip combination, affordable ones first (cheapest first),
-    then near-misses ordered by how little they're short.
+    """Every full-trip combination, affordable ones first, then near-misses ordered
+    by how little they're short.
+
+    Among affordable options, fewer self-transfers wins over price (see
+    `Itinerary.self_transfers`); within the same number, cheapest first.
 
     A round trip pairs each outbound with each return and assesses them together,
     so legs in the same program share one balance.

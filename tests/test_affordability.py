@@ -165,3 +165,52 @@ def test_no_return_results_means_no_full_trip_options():
     result = TripSearchResult(trip_id=1, outbound=[trip(leg("delta", 1))], return_trip=[])
 
     assert rank_trip(result, balances(delta=100)) == []
+
+
+def test_single_ticket_options_outrank_cheaper_self_transfers():
+    result = TripSearchResult(
+        trip_id=1,
+        outbound=[
+            trip(leg("delta", 8_000), leg("aeroplan", 10_000), via="LAX"),      # 18,000, self-transfer
+            trip(leg("aeroplan", 15_000), leg("aeroplan", 15_000), via="LAX"),  # 30,000, one ticket
+        ],
+        return_trip=None,
+    )
+
+    ranked = rank_trip(result, balances(delta=50_000, capital_one=100_000))
+
+    assert [o.total_miles for o in ranked] == [30_000, 18_000]
+    assert [o.self_transfers for o in ranked] == [0, 1]
+
+
+def test_within_the_same_self_transfer_count_cheapest_wins():
+    result = TripSearchResult(
+        trip_id=1,
+        outbound=[trip(leg("aeroplan", 40_000)), trip(leg("aeroplan", 25_000)), trip(leg("delta", 9_000), leg("aeroplan", 1_000), via="LAX")],
+        return_trip=None,
+    )
+
+    ranked = rank_trip(result, balances(delta=50_000, capital_one=100_000))
+
+    assert [(o.self_transfers, o.total_miles) for o in ranked] == [(0, 25_000), (0, 40_000), (1, 10_000)]
+
+
+def test_round_trip_counts_self_transfers_in_both_directions():
+    mixed = trip(leg("delta", 5_000), leg("aeroplan", 5_000), via="LAX")
+    result = TripSearchResult(trip_id=1, outbound=[mixed], return_trip=[mixed])
+
+    (option,) = rank_trip(result, balances(delta=50_000, capital_one=100_000))
+
+    assert option.self_transfers == 2
+
+
+def test_near_misses_are_still_ordered_by_shortfall_not_by_tickets():
+    single_but_far = trip(leg("delta", 30_000))                        # 15,951 short
+    one_ticket_close = trip(leg("delta", 10_000), leg("delta", 5_000), via="LAX")  # 951 short, same program, same day
+    self_transfer_farther = trip(leg("delta", 10_000), leg("united", 5_000), via="LAX")  # united has 0, short 5,000
+    result = TripSearchResult(trip_id=1, outbound=[single_but_far, self_transfer_farther, one_ticket_close], return_trip=None)
+
+    ranked = rank_trip(result, balances(delta=14_049))
+
+    shortfalls = [o.affordability.total_shortfall for o in ranked]
+    assert shortfalls == sorted(shortfalls)

@@ -50,6 +50,23 @@ def test_combine_pairs_same_day_and_next_day_but_not_earlier_or_later():
     assert all(i.via == "LAX" for i in result)
 
 
+def test_self_transfers_counts_connections_that_could_not_be_one_ticket():
+    from flight_optimizer.itineraries import Itinerary
+
+    single_leg = Itinerary(legs=(award("RNO", "SJO", JAN9, 50_000),), via=None)
+    same_program_same_day = Itinerary(
+        legs=(award("RNO", "LAX", JAN9, 1, source="aeroplan"), award("LAX", "SJO", JAN9, 1, source="aeroplan")), via="LAX")
+    different_programs = Itinerary(
+        legs=(award("RNO", "LAX", JAN9, 1, source="delta"), award("LAX", "SJO", JAN9, 1, source="aeroplan")), via="LAX")
+    overnight_same_program = Itinerary(
+        legs=(award("RNO", "LAX", JAN9, 1, source="aeroplan"), award("LAX", "SJO", JAN10, 1, source="aeroplan")), via="LAX")
+
+    assert single_leg.self_transfers == 0
+    assert same_program_same_day.self_transfers == 0
+    assert different_programs.self_transfers == 1
+    assert overnight_same_program.self_transfers == 1  # a stopover, not assumed to be one ticket
+
+
 def test_itinerary_totals_miles_overall_and_per_program():
     (itinerary,) = combine_via_gateway(
         [award("RNO", "LAX", JAN9, 10_900, source="delta")],

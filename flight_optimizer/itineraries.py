@@ -33,7 +33,25 @@ class Itinerary:
         return sum(leg.miles for leg in self.legs)
 
     @property
+    def self_transfers(self) -> int:
+        """Connections that would be separate bookings: 0 if this could be one ticket.
+
+        A heuristic, not a guarantee. It counts as one ticket only when every leg is in
+        the same program and the connection is the same day (an overnight stay is a
+        stopover, which a program may not sell as one ticket). Even then, the program
+        may price the combined itinerary differently from the sum of its legs, so
+        verify on the program's own site. Separate tickets mean bags are re-checked
+        and the airline isn't responsible if a late first leg misses the second.
+        """
+        if len(self.legs) < 2:
+            return 0
+        first, second = self.legs
+        same_ticket = first.source == second.source and first.date == second.date
+        return 0 if same_ticket else 1
+
+    @property
     def miles_by_program(self) -> dict[str, int]:
+
         totals: dict[str, int] = {}
         for leg in self.legs:
             totals[leg.source] = totals.get(leg.source, 0) + leg.miles

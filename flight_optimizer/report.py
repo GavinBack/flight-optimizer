@@ -48,6 +48,47 @@ def _itinerary_text(itinerary: Itinerary) -> str:
     )
 
 
+def _booking_text(itinerary: Itinerary) -> str:
+    first = itinerary.legs[0]
+    if len(itinerary.legs) == 1:
+        return f"1 booking ({first.source})"
+    second = itinerary.legs[1]
+    if itinerary.self_transfers == 0:
+        return f"1 booking ({first.source}), connecting at {itinerary.via}"
+    reason = (
+        f"{first.source} + {second.source}"
+        if first.source != second.source
+        else f"{first.source}, overnight stop"
+    )
+    return f"2 bookings, self-transfer at {itinerary.via} ({reason})"
+
+
+def _tickets_line(option: TripOption) -> str:
+    parts = "; ".join(
+        f"{label} {_booking_text(it)}"
+        for label, it in zip(("out", "back"), option.itineraries)
+    )
+    note = "  [bags re-checked, no missed-connection cover there]" if option.self_transfers else ""
+    return f"tickets: {parts}{note}"
+
+
+def _preference_note(affordable: list[TripOption]) -> str | None:
+    """What preferring fewer self-transfers costs versus the cheapest affordable option."""
+    if not affordable:
+        return None
+    best, cheapest = affordable[0], min(affordable, key=lambda o: o.total_miles)
+    if best.self_transfers > 0:
+        return "No fully single-ticket option is affordable; every option below has a self-transfer."
+    if best.total_miles > cheapest.total_miles:
+        extra = best.total_miles - cheapest.total_miles
+        return (
+            f"Ranked single-ticket first: #1 costs {extra:,} more miles than the cheapest "
+            f"affordable option ({cheapest.total_miles:,} miles, "
+            f"{cheapest.self_transfers} self-transfer{'s' if cheapest.self_transfers != 1 else ''})."
+        )
+    return None
+
+
 def _shape(option: TripOption) -> tuple:
     """Everything about an option except dates, to collapse same-price date variants."""
     return tuple(
@@ -179,6 +220,9 @@ def render_trip(
 
     out.append("")
     out.append(f"BEST AFFORDABLE OPTIONS  ({len(affordable):,} of {len(ranked):,} combinations)")
+    note = _preference_note(affordable)
+    if note:
+        out.append(f"  {note}")
     if not ranked:
         out.append("  No award options found through the gateways.")
     elif not affordable:
@@ -195,6 +239,7 @@ def render_trip(
         out.append(head)
         for label, itinerary in zip(("out ", "back"), option.itineraries):
             out.append(f"  {label}  {_itinerary_text(itinerary)}")
+        out.append("  " + _tickets_line(option))
         out.extend("  " + line for line in _payment_lines(option, balances))
         for index, warning in enumerate(_warnings(option, today)):
             out.append(("  check: " if index == 0 else "         ") + warning)
@@ -254,6 +299,9 @@ def build_report(
         "NOTES\n"
         "  * = connecting flight. Award figures are before taxes and fees, so cents per mile are upper bounds.\n"
         "  Legs reporting 0 seats are excluded as unbookable (some programs report 0 for everything).\n"
+        "  One ticket = same program and same-day connection (assumed, so verify: a program may price the\n"
+        "  combined trip differently from its legs). Cash baselines are single tickets, so mixed-program\n"
+        "  awards are not a like-for-like comparison on protection.\n"
         "  Seats.aero data is a cached snapshot and shows dates but not flight times. Verify on the\n"
         "  airline's site before transferring Capital One miles, because transfers cannot be undone.\n"
         + ("  " + " | ".join(usage) if usage else "")

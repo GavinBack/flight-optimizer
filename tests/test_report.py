@@ -125,6 +125,53 @@ def test_clean_option_has_no_check_line(conn):
     assert "check:" not in render(conn, [clean])
 
 
+def one_ticket_option():
+    return option(
+        [leg("RNO", "LAX", "aeroplan", 12_500, JAN9), leg("LAX", "SJO", "aeroplan", 25_000, JAN9)],
+        [leg("SJO", "LAX", "aeroplan", 25_000, JAN16), leg("LAX", "RNO", "aeroplan", 12_500, JAN16)],
+    )
+
+
+def self_transfer_option():
+    return option(
+        [leg("RNO", "LAX", "american", 10_000, JAN9), leg("LAX", "SJO", "aeroplan", 15_000, JAN9)],
+        [leg("SJO", "LAX", "aeroplan", 15_000, JAN16), leg("LAX", "RNO", "delta", 10_000, JAN16)],
+    )
+
+
+def test_tickets_line_distinguishes_one_ticket_from_self_transfers(conn):
+    text = render(conn, [one_ticket_option(), self_transfer_option()])
+
+    assert "tickets: out 1 booking (aeroplan), connecting at LAX; back 1 booking (aeroplan), connecting at LAX" in text
+    assert "out 2 bookings, self-transfer at LAX (american + aeroplan)" in text
+    assert text.count("bags re-checked, no missed-connection cover there") == 1  # only on the mixed option
+
+
+def test_overnight_stop_in_one_program_is_reported_as_two_bookings(conn):
+    overnight = option(
+        [leg("RNO", "LAX", "aeroplan", 12_500, JAN9), leg("LAX", "SJO", "aeroplan", 25_000, JAN10)],
+        [leg("SJO", "LAX", "aeroplan", 25_000, JAN16), leg("LAX", "RNO", "aeroplan", 12_500, JAN16)],
+    )
+
+    assert "self-transfer at LAX (aeroplan, overnight stop)" in render(conn, [overnight])
+
+
+def test_preference_note_states_what_single_ticket_costs(conn):
+    text = render(conn, [one_ticket_option(), self_transfer_option()])
+
+    assert "Ranked single-ticket first: #1 costs 25,000 more miles than the cheapest affordable option (50,000 miles, 2 self-transfers)." in text
+
+
+def test_no_preference_note_when_the_single_ticket_option_is_also_cheapest(conn):
+    assert "Ranked single-ticket first" not in render(conn, [one_ticket_option()])
+
+
+def test_report_says_when_no_single_ticket_option_is_affordable(conn):
+    text = render(conn, [self_transfer_option()])
+
+    assert "No fully single-ticket option is affordable" in text
+
+
 def test_closest_misses_shown_with_shortfall(conn):
     short = option(
         [leg("RNO", "LAX", "delta", 16_700, JAN9), leg("LAX", "SJO", "aeroplan", 25_000, JAN10)],

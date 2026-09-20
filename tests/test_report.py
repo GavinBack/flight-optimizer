@@ -573,3 +573,72 @@ def test_cash_fares_show_when_they_were_fetched_and_the_refresh_window(conn):
 
 def test_no_fetch_line_when_the_baseline_has_no_fetch_time(conn):
     assert "fares fetched" not in render(conn, [best_option()])
+
+
+# --- buying miles to close a gap -------------------------------------------------------------------
+
+def gap_option(out_miles=16_700, *, updated="2026-09-19T00:00:00Z", out_day=JAN9):
+    """Delta short by out_miles - 14,049."""
+    return option(
+        [leg("RNO", "LAX", "delta", out_miles, JAN9, updated=updated), leg("LAX", "SJO", "aeroplan", 25_000, out_day, updated=updated)],
+        [leg("SJO", "LAX", "aeroplan", 25_000, JAN16, updated=updated), leg("LAX", "RNO", "american", 10_000, JAN16, updated=updated)],
+    )
+
+
+def test_a_near_miss_short_in_one_buyable_program_shows_what_buying_the_gap_costs(conn):
+    text = render(conn, [gap_option()])
+
+    assert "GAPS YOU COULD CLOSE BY BUYING MILES" in text
+    assert "76,700 miles + $150.50: buy 4,000 delta miles for about $150.50 (3.76 c each, short 2,651)" in text
+    assert "[data current, oldest 1d]" in text.split("GAPS YOU COULD CLOSE")[1]
+
+
+def test_the_section_states_that_prices_are_estimates(conn):
+    text = render(conn, [gap_option()])
+
+    assert "prices are estimates from secondary sources: confirm on the program's site before paying" in text
+
+
+def test_the_flights_behind_each_purchase_are_shown(conn):
+    text = render(conn, [gap_option()])
+    section = text.split("GAPS YOU COULD CLOSE")[1]
+
+    assert "RNO>LAX Jan 09" in section and "LAX>RNO Jan 16" in section
+
+
+def test_no_buy_section_when_nothing_can_be_fixed_by_buying(conn):
+    assert "GAPS YOU COULD CLOSE" not in render(conn, [best_option()])   # already affordable
+    assert "GAPS YOU COULD CLOSE" not in render(conn, [])
+
+
+def test_the_buy_section_is_limited_and_skips_same_shape_date_variants(conn):
+    options = [gap_option(16_700 + 1_000 * i) for i in range(5)] + [gap_option(16_700, out_day=JAN10)]
+
+    text = render(conn, options, buy_n=2)
+    section = text.split("GAPS YOU COULD CLOSE")[1]
+
+    assert section.count("buy ") == 2
+
+
+def test_stale_data_is_labelled_in_the_buy_section(conn):
+    text = render(conn, [gap_option(updated="2026-08-01T00:00:00Z")])
+
+    assert "[DATA STALE, oldest 50d]" in text.split("GAPS YOU COULD CLOSE")[1]
+
+
+def test_the_buy_section_comes_after_the_closest_misses(conn):
+    text = render(conn, [gap_option()])
+
+    assert text.index("CLOSEST MISSES") < text.index("GAPS YOU COULD CLOSE")
+
+
+def test_each_buy_plan_is_shown_beside_the_cash_ticket_price(conn):
+    text = render(conn, [gap_option()])
+
+    assert "(cash ticket: $2,267)" in text.split("GAPS YOU COULD CLOSE")[1]
+
+
+def test_without_a_cash_baseline_the_buy_plan_omits_the_comparison(conn):
+    text = render(conn, [gap_option()], baseline=None)
+
+    assert "GAPS YOU COULD CLOSE" in text and "cash ticket:" not in text.split("GAPS YOU COULD CLOSE")[1]

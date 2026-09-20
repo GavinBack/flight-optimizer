@@ -83,6 +83,28 @@ CREATE TABLE IF NOT EXISTS search_cache (
     fetched_at   TEXT NOT NULL
 );
 
+-- Buy-miles sales read from deal-site feeds (see promos.py). tiers_json is a list of
+-- [min_points, max_points_or_null, percent]; empty means only the headline is known.
+CREATE TABLE IF NOT EXISTS promos (
+    key              TEXT PRIMARY KEY,
+    program          TEXT NOT NULL,
+    kind             TEXT NOT NULL CHECK (kind IN ('bonus', 'discount')),
+    headline_percent INTEGER,
+    tiers_json       TEXT NOT NULL DEFAULT '[]',
+    ends             TEXT,
+    title            TEXT NOT NULL,
+    url              TEXT NOT NULL,
+    source           TEXT NOT NULL,
+    first_seen       TEXT NOT NULL,
+    last_seen        TEXT NOT NULL
+);
+
+-- Small key/value store: when promos were last refreshed, which roundup pages were read.
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS balances (
     program    TEXT PRIMARY KEY,
     balance    INTEGER NOT NULL DEFAULT 0 CHECK (balance >= 0),
@@ -295,6 +317,12 @@ def set_balance(conn: sqlite3.Connection, program: str, balance: int) -> None:
             " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
             (program, balance),
         )
+
+
+def delete_manual_promos(conn: sqlite3.Connection, program: str) -> int:
+    """Remove the sales added by hand for a program. Sales read from feeds are left alone."""
+    with conn:
+        return conn.execute("DELETE FROM promos WHERE source = 'manual' AND program = ?", (program,)).rowcount
 
 
 def balance_updates(conn: sqlite3.Connection) -> dict[str, str]:

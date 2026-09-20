@@ -87,11 +87,11 @@ def env(monkeypatch, tmp_path):
     conn.close()
 
 
-def run(argv, tmp_path, *, ntfy="default", awards=None):
+def run(argv, tmp_path, *, ntfy="default", awards=None, promos=None):
     awards = awards or FakeAwards()
     ntfy_client = FakeNtfy() if ntfy == "default" else ntfy
     code = main(argv, env_file=None, plans_dir=tmp_path / "plans",
-                clients_factory=lambda settings, conn, fresh: Clients(awards=awards, cash=None, ntfy=ntfy_client))
+                clients_factory=lambda settings, conn, fresh: Clients(awards=awards, cash=None, ntfy=ntfy_client, promos=promos))
     return code, awards, ntfy_client
 
 
@@ -154,7 +154,7 @@ def test_a_failed_send_is_not_recorded_so_the_next_run_retries(env, capsys):
     code, _, _ = run(["notify"], tmp_path, ntfy=FakeNtfy(fail=True))
 
     assert code == 1 and alert_rows(conn) == []
-    assert "could not send the alert" in capsys.readouterr().err
+    assert "could not send the award alert" in capsys.readouterr().err
     retry_code, _, working = run(["notify"], tmp_path)
     assert retry_code == 0 and len(working.sent) == 1 and len(alert_rows(conn)) == 1
 
@@ -564,3 +564,283 @@ def test_current_data_still_alerts_normally(env):
     _, _, ntfy = run(["notify"], tmp_path)
 
     assert len(ntfy.sent) == 1
+
+
+
+# --- buy-miles sales: the promos command and the daily check ---------------------------------------------------------
+
+from datetime import timedelta  # noqa: E402
+
+from flight_optimizer.promos import FEEDS, FeedEntry, PromoSourceError  # noqa: E402
+
+FUTURE = (date.today() + timedelta(days=10)).isoformat()
+
+
+class FakePromoSource:
+    def __init__(self, feeds=None, pages=None, fail=()):
+        self.feeds, self.pages, self.fail = feeds or {}, pages or {}, set(fail)
+        self.feed_calls = []
+
+    def feed(self, url):
+        self.feed_calls.append(url)
+        if url in self.fail:
+            raise PromoSourceError("boom")
+        return self.feeds.get(url, [])
+
+    def page_text(self, url):
+        return self.pages[url]
+
+
+def short_in_delta(conn):
+    """Delta short by 7,751 for every option: the near-miss a sale could close."""
+    db.set_balance(conn, "delta", 14_049)
+
+
+def add_delta_sale(tmp_path, *extra):
+    return run(["promos", "add", "delta", "--bonus", "50", "--ends", FUTURE, *extra], tmp_path)
+
+
+def test_promos_add_records_a_sale_and_promos_lists_it(env, capsys):
+    _, tmp_path = env
+
+    code, _, _ = add_delta_sale(tmp_path, "--tier", "2000+:50")
+    assert code == 0 and "Recorded a 50% bonus sale for Delta SkyMiles" in capsys.readouterr().out
+
+    run(["promos", "--no-fetch"], tmp_path)
+    out = capsys.readouterr().out
+    assert "Delta SkyMiles" in out and "50% bonus" in out and "2,000+: 50%" in out and FUTURE in out and "[manual]" in out
+
+
+def test_a_sale_added_without_tiers_is_labelled_a_best_case(env, capsys):
+    _, tmp_path = env
+
+    add_delta_sale(tmp_path)
+
+    assert "treated as a best case and will not trigger alerts" in capsys.readouterr().out
+    run(["promos", "--no-fetch"], tmp_path)
+    assert "headline only" in capsys.readouterr().out
+
+
+def test_tiers_can_be_ranges_or_open_ended_and_are_kept_in_order(env, capsys):
+    _, tmp_path = env
+    run(["promos", "add", "aeroplan", "--bonus", "100", "--ends", FUTURE, "--tier", "80000+:100", "--tier", "5000-25000:50"], tmp_path)
+    capsys.readouterr()
+
+    run(["promos", "--no-fetch"], tmp_path)
+
+    assert "5,000-25,000: 50% | 80,000+: 100%" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("argv, message", [
+    (["promos", "add", "hilton", "--bonus", "50", "--ends", FUTURE], "Unknown program"),
+    (["promos", "add", "delta", "--bonus", "50", "--ends", "next week"], "should look like 2026-09-30"),
+    (["promos", "add", "delta", "--bonus", "500", "--ends", FUTURE], "between 1 and 300"),
+    (["promos", "add", "delta", "--bonus", "50", "--ends", FUTURE, "--tier", "lots"], "should look like 5000-25000:50"),
+    (["promos", "add", "delta", "--bonus", "50", "--ends", FUTURE, "--tier", "9000-2000:50"], "top is below the bottom"),
+    (["promos", "add", "delta", "--bonus", "50", "--ends", FUTURE, "--tier", "5000:50"], "should look like"),
+])
+def test_bad_sale_input_is_rejected_with_a_clear_message(env, capsys, argv, message):
+    _, tmp_path = env
+
+    code, _, _ = run(argv, tmp_path)
+
+    assert code == 1 and message in capsys.readouterr().err
+    run(["promos", "--no-fetch"], tmp_path)
+    assert "No live buy-miles sales" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("argv", [
+    ["promos", "add", "delta", "--bonus", "50", "--discount", "40", "--ends", FUTURE],   # both kinds
+    ["promos", "add", "delta", "--ends", FUTURE],                                          # neither
+    ["promos", "add", "delta", "--bonus", "50"],                                            # no end date
+])
+def test_the_add_command_insists_on_a_kind_and_an_end_date(env, argv):
+    _, tmp_path = env
+
+    with pytest.raises(SystemExit) as excinfo:
+        run(argv, tmp_path)
+
+    assert excinfo.value.code == 2
+
+
+def test_removing_only_touches_the_sales_added_by_hand(env, capsys):
+    conn, tmp_path = env
+    add_delta_sale(tmp_path)
+    from flight_optimizer.promos import Promo, save_promo
+    save_promo(conn, Promo(key="feed:delta", program="delta", kind="bonus", headline_percent=30, tiers=(),
+                           ends=date.today() + timedelta(days=5), title="feed", url="https://x.test", source="Feed", last_seen=date.today()))
+    capsys.readouterr()
+
+    code, _, _ = run(["promos", "remove", "delta"], tmp_path)
+
+    assert code == 0 and "Removed 1 hand-added sale(s)" in capsys.readouterr().out
+    run(["promos", "--no-fetch"], tmp_path)
+    out = capsys.readouterr().out
+    assert "[Feed]" in out and "[manual]" not in out
+
+
+def test_removing_when_nothing_was_added_says_so(env, capsys):
+    _, tmp_path = env
+
+    run(["promos", "remove", "delta"], tmp_path)
+
+    assert "No hand-added sales for Delta SkyMiles" in capsys.readouterr().out
+
+
+def test_the_promos_command_reads_the_feeds_then_lists_what_it_found(env, capsys):
+    _, tmp_path = env
+    source = FakePromoSource(feeds={FEEDS["LoyaltyLobby"]: [
+        FeedEntry("Delta Buy SkyMiles At Up To 50% Bonus Until " + (date.today() + timedelta(days=9)).strftime("%B %d, %Y"),
+                  "https://ll.test/delta", date.today())]})
+
+    code, _, _ = run(["promos"], tmp_path, promos=source)
+
+    out = capsys.readouterr().out
+    assert code == 0 and source.feed_calls and "1 sale(s) found or refreshed" in out
+    assert "Delta SkyMiles" in out and "50% bonus" in out and "[LoyaltyLobby]" in out
+    assert "confirm terms on the program's page" in out
+
+
+def test_no_fetch_never_goes_online(env):
+    _, tmp_path = env
+    source = FakePromoSource()
+
+    run(["promos", "--no-fetch"], tmp_path, promos=source)
+
+    assert source.feed_calls == []
+
+
+def test_a_broken_sales_source_is_reported_but_is_not_fatal(env, capsys):
+    _, tmp_path = env
+    source = FakePromoSource(fail=[FEEDS["Live From A Lounge"]])
+
+    code, _, _ = run(["promos"], tmp_path, promos=source)
+
+    assert code == 0 and "could not read: Live From A Lounge: boom" in capsys.readouterr().err
+
+
+def test_an_empty_sales_list_says_so(env, capsys):
+    _, tmp_path = env
+
+    run(["promos", "--no-fetch"], tmp_path)
+
+    assert "No live buy-miles sales on record." in capsys.readouterr().out
+
+
+# --- sale alerts in the daily notify ----------------------------------------------------------------------------------
+
+def test_notify_sends_a_sale_alert_when_a_known_tier_sale_closes_a_gap(env, capsys):
+    conn, tmp_path = env
+    short_in_delta(conn)
+    add_delta_sale(tmp_path, "--tier", "2000+:50", "--url", "https://delta.test/sale")
+    capsys.readouterr()
+
+    code, _, ntfy = run(["notify"], tmp_path)
+
+    assert code == 0 and len(ntfy.sent) == 1
+    sent = ntfy.sent[0]
+    assert sent["title"] == "Costa Rica: delta sale closes a gap" and sent["click"] == "https://delta.test/sale"
+    assert "Total: 71,800 miles + $225.75 (retail would be $301.00)." in sent["message"]
+    (row,) = alert_rows(conn)
+    assert row["alert_type"] == "promo" and row["cash_price"] is not None
+    assert "sale alert sent" in capsys.readouterr().out
+
+
+def test_the_sale_alert_is_not_repeated_on_the_next_run(env, capsys):
+    conn, tmp_path = env
+    short_in_delta(conn)
+    add_delta_sale(tmp_path, "--tier", "2000+:50")
+    _, _, ntfy = run(["notify"], tmp_path)
+
+    run(["notify"], tmp_path, ntfy=ntfy)
+
+    assert len(ntfy.sent) == 1 and len(alert_rows(conn)) == 1
+
+
+def test_a_headline_only_sale_never_alerts_but_still_shows_in_the_report(env, capsys):
+    conn, tmp_path = env
+    short_in_delta(conn)
+    add_delta_sale(tmp_path)   # no tiers
+    capsys.readouterr()
+
+    _, _, ntfy = run(["notify"], tmp_path)
+    assert ntfy.sent == []
+
+    run(["report"], tmp_path)
+    out = capsys.readouterr().out
+    assert "GAPS YOU COULD CLOSE BY BUYING MILES" in out and "BEST CASE: this sale's tiers are not known" in out
+
+
+def test_the_report_prices_a_gap_with_a_sale_and_shows_the_retail_price(env, capsys):
+    conn, tmp_path = env
+    short_in_delta(conn)
+    add_delta_sale(tmp_path, "--tier", "2000+:50")
+    capsys.readouterr()
+
+    run(["report"], tmp_path)
+
+    out = capsys.readouterr().out
+    assert "buy 6,000 delta miles for about $225.75" in out and "50% bonus sale until" in out and "retail $301.00" in out
+
+
+def test_notify_refreshes_the_sales_feeds_once_and_survives_a_broken_one(env, capsys):
+    _, tmp_path = env
+    source = FakePromoSource(fail=[FEEDS["Doctor of Credit"]])
+
+    code, _, _ = run(["notify", "--dry-run"], tmp_path, promos=source)
+
+    assert code == 0 and len(source.feed_calls) == len(FEEDS)
+    assert "could not read a sales source: Doctor of Credit: boom" in capsys.readouterr().err
+
+
+def test_a_dry_run_shows_the_sale_alert_and_sends_and_records_nothing(env, capsys):
+    conn, tmp_path = env
+    short_in_delta(conn)
+    add_delta_sale(tmp_path, "--tier", "2000+:50")
+    capsys.readouterr()
+
+    _, _, ntfy = run(["notify", "--dry-run"], tmp_path)
+
+    out = capsys.readouterr().out
+    assert "would send for Costa Rica: sale alert" in out and "delta sale closes a gap" in out
+    assert ntfy.sent == [] and alert_rows(conn) == []
+
+
+def test_a_failed_sale_alert_is_not_recorded_so_it_retries(env, capsys):
+    conn, tmp_path = env
+    short_in_delta(conn)
+    add_delta_sale(tmp_path, "--tier", "2000+:50")
+    capsys.readouterr()
+
+    code, _, _ = run(["notify"], tmp_path, ntfy=FakeNtfy(fail=True))
+
+    assert code == 1 and alert_rows(conn) == []
+    assert "could not send the sale alert" in capsys.readouterr().err
+    _, _, working = run(["notify"], tmp_path)
+    assert len(working.sent) == 1
+
+
+def test_an_expired_sale_never_alerts(env):
+    conn, tmp_path = env
+    short_in_delta(conn)
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    run(["promos", "add", "delta", "--bonus", "50", "--ends", yesterday, "--tier", "2000+:50"], tmp_path)
+
+    _, _, ntfy = run(["notify"], tmp_path)
+
+    assert ntfy.sent == []
+
+
+def test_the_list_shows_one_entry_per_program_preferring_the_one_with_tiers(env, capsys):
+    conn, tmp_path = env
+    from flight_optimizer.promos import Promo, PromoTier, save_promo
+    end = date.today() + timedelta(days=5)
+    save_promo(conn, Promo(key="roundup#aeroplan", program="aeroplan", kind="bonus", headline_percent=100,
+                           tiers=(PromoTier(5_000, 25_000, 50),), ends=end, title="r", url="https://r.test", source="Roundup", last_seen=date.today()))
+    save_promo(conn, Promo(key="title#aeroplan", program="aeroplan", kind="bonus", headline_percent=100,
+                           tiers=(), ends=end, title="t", url="https://t.test", source="Title", last_seen=date.today()))
+
+    run(["promos", "--no-fetch"], tmp_path)
+
+    out = capsys.readouterr().out
+    assert out.count("Air Canada Aeroplan") == 1 and "5,000-25,000: 50%" in out and "headline only" not in out

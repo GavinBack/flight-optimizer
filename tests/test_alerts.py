@@ -321,3 +321,168 @@ def test_usable_for_alert_keeps_current_and_aging_and_drops_stale(conn):
     kept = usable_for_alert(analysis_for(trip, options), date.today())
 
     assert kept == options[:2]
+
+
+# --- buy-miles sale alerts -------------------------------------------------------------------------------------------
+
+from flight_optimizer.alerts import (  # noqa: E402
+    build_promo_alert, decide_promo_alert, qualifies, qualifying_plan, record_promo_sent,
+)
+from flight_optimizer.promos import Promo, PromoTier  # noqa: E402
+
+SHORT = {"delta": 14_049, "american": 26_115, "united": 3_765, "capital_one": 115_519}
+
+
+def gap_option(out_miles=16_700, *, updated=RECENT, back_source="american", back_miles=10_000):
+    """Delta short by out_miles - 14,049."""
+    return option(
+        [leg("RNO", "LAX", "delta", out_miles, JAN9, updated=updated), leg("LAX", "SJO", "aeroplan", 25_000, JAN9, updated=updated)],
+        [leg("SJO", "LAX", "aeroplan", 25_000, JAN16, updated=updated), leg("LAX", "RNO", back_source, back_miles, JAN16, updated=updated)],
+        SHORT,
+    )
+
+
+def delta_sale(*, tiers=(PromoTier(2_000, None, 50),), percent=50, ends=None, url="https://delta.test/sale", program="delta"):
+    return Promo(key=url, program=program, kind="bonus", headline_percent=percent, tiers=tuple(tiers),
+                 ends=ends or (date.today() + timedelta(days=10)), title="Delta sale", url=url, source="test",
+                 last_seen=date.today())
+
+
+def promo_alert_for(conn, options, promos, **kwargs):
+    trip = add_trip(conn)
+    analysis = analysis_for(trip, options)
+    return trip, analysis, decide_promo_alert(conn, analysis, promos, **kwargs)
+
+
+def test_a_known_tier_sale_under_the_threshold_makes_an_alert(conn):
+    _, _, alert = promo_alert_for(conn, [gap_option()], {"delta": delta_sale()})
+
+    assert alert is not None
+    assert alert.title == "Costa Rica: delta sale closes a gap"
+    assert alert.plan.total_cost == 75.25 and alert.plan.retail_cost == 150.50
+
+
+def test_the_alert_message_states_the_deal_the_total_and_what_retail_would_cost(conn):
+    _, _, alert = promo_alert_for(conn, [gap_option()], {"delta": delta_sale()})
+
+    lines = alert.message.split("\n")
+    assert lines[0] == "RNO > SJO  Jan 09 - Jan 16"
+    assert "A delta sale makes a 76,700-mile option affordable." in lines[1]
+    assert any("buy 2,000 delta miles for about $75.25" in l and "50% bonus sale" in l for l in lines)
+    assert "Total: 76,700 miles + $75.25 (retail would be $150.50)." in alert.message
+    assert "Verify the flights before buying." in alert.message
+    assert lines[-1] == "Details: python -m flight_optimizer promos"
+
+
+def test_the_alert_opens_the_sale_page_and_never_includes_balances(conn):
+    _, _, alert = promo_alert_for(conn, [gap_option()], {"delta": delta_sale(url="https://delta.test/sale")})
+
+    assert alert.click == "https://delta.test/sale" and alert.priority == 3 and alert.tags == ("moneybag",)
+    for secret in ("115,519", "26,115", "14,049", "balance"):
+        assert secret not in alert.message.lower()
+    assert len(alert.message) < 700
+
+
+def test_a_headline_only_sale_is_never_alerted_on(conn):
+    _, _, alert = promo_alert_for(conn, [gap_option()], {"delta": delta_sale(tiers=())})
+
+    assert alert is None
+
+
+def test_a_sale_above_the_price_threshold_is_not_worth_an_alert(conn):
+    weak = delta_sale(tiers=(PromoTier(2_000, None, 10),), percent=10)   # ~3.4 cents against a 2.63 threshold
+
+    assert promo_alert_for(conn, [gap_option()], {"delta": weak})[2] is None
+
+
+def test_no_alert_without_a_sale(conn):
+    assert promo_alert_for(conn, [gap_option()], {})[2] is None
+
+
+def test_a_sale_for_a_program_that_is_not_short_does_nothing(conn):
+    assert promo_alert_for(conn, [gap_option()], {"jetblue": delta_sale(program="jetblue")})[2] is None
+
+
+def test_an_expired_sale_does_not_alert(conn):
+    over = delta_sale(ends=date.today() - timedelta(days=1))
+
+    assert promo_alert_for(conn, [gap_option()], {"delta": over})[2] is None
+
+
+def test_an_option_resting_on_stale_data_is_never_worth_a_sale_alert(conn):
+    stale = gap_option(updated="2020-01-01T00:00:00Z")
+
+    assert promo_alert_for(conn, [stale], {"delta": delta_sale()})[2] is None
+
+
+def test_an_already_affordable_option_needs_no_sale(conn):
+    assert promo_alert_for(conn, [gap_option(10_000)], {"delta": delta_sale()})[2] is None
+
+
+def test_every_purchase_in_the_plan_must_be_a_good_sale(conn):
+    two_short = gap_option(back_source="united", back_miles=10_000)   # delta AND united short
+
+    # only Delta has a sale: the United part would be bought at retail
+    assert promo_alert_for(conn, [two_short], {"delta": delta_sale()})[2] is None
+
+
+def test_qualifies_needs_a_sale_known_tiers_and_a_priced_program(conn):
+    trip = add_trip(conn)
+    analysis = analysis_for(trip, [gap_option()])
+    from datetime import date as _date
+    good = qualifying_plan(analysis, {"delta": delta_sale()}, _date.today())
+
+    assert good is not None and all(qualifies(p) for p in good.purchases)
+    retail_only = qualifying_plan(analysis, {}, _date.today())
+    assert retail_only is None
+
+
+def test_the_same_sale_and_option_is_not_alerted_twice(conn):
+    trip, analysis, first = promo_alert_for(conn, [gap_option()], {"delta": delta_sale()})
+    record_promo_sent(conn, first)
+
+    assert decide_promo_alert(conn, analysis, {"delta": delta_sale()}) is None
+
+
+def test_a_cheaper_deal_on_the_same_option_alerts_again_inside_the_window(conn):
+    trip, analysis, first = promo_alert_for(conn, [gap_option()], {"delta": delta_sale()})
+    # Pretend the earlier alert was for the same option and sale at a higher price.
+    db.record_alert(conn, trip_id=trip["id"], alert_type="promo", dedupe_key=first.key, miles=76_700, cash_price=999.0)
+
+    again = decide_promo_alert(conn, analysis, {"delta": delta_sale()})
+
+    assert again is not None and again.plan.total_cost == 75.25
+
+
+def test_a_dearer_or_equal_deal_is_not_repeated_inside_the_window(conn):
+    trip, analysis, first = promo_alert_for(conn, [gap_option()], {"delta": delta_sale()})
+    db.record_alert(conn, trip_id=trip["id"], alert_type="promo", dedupe_key=first.key, miles=76_700, cash_price=50.0)
+
+    assert decide_promo_alert(conn, analysis, {"delta": delta_sale()}) is None
+
+
+def test_the_same_alert_returns_after_the_window(conn):
+    trip, analysis, first = promo_alert_for(conn, [gap_option()], {"delta": delta_sale()})
+    record_promo_sent(conn, first)
+    later = datetime.now(timezone.utc) + timedelta(days=RE_ALERT_DAYS + 1)
+    refreshed = analysis_for(trip, [gap_option(updated=later.date().isoformat() + "T00:00:00Z")])
+    sale = delta_sale(ends=later.date() + timedelta(days=5))
+
+    assert decide_promo_alert(conn, refreshed, {"delta": sale}, now=later) is not None
+
+
+def test_recording_a_promo_alert_stores_its_type_cost_and_miles(conn):
+    trip, _, alert = promo_alert_for(conn, [gap_option()], {"delta": delta_sale()})
+
+    record_promo_sent(conn, alert)
+
+    row = db.last_alert(conn, trip["id"], alert.key)
+    assert row["alert_type"] == "promo" and row["cash_price"] == 75.25 and row["miles"] == 76_700
+
+
+def test_a_promo_alert_does_not_suppress_an_award_alert_for_the_same_trip(conn):
+    trip, analysis, promo_alert = promo_alert_for(conn, [gap_option()], {"delta": delta_sale()})
+    record_promo_sent(conn, promo_alert)
+    affordable = analysis_for(trip, [good_option()])
+
+    assert decide_alert(conn, affordable) is not None

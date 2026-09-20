@@ -6,6 +6,7 @@ from datetime import date
 from flight_optimizer import db
 from flight_optimizer.affordability import SOURCE_TO_PROGRAM, TripOption, slow_transfers
 from flight_optimizer.analysis import analyze_trip
+from flight_optimizer.buying import ESTIMATE_NOTE, BuyPlan, Purchase, rank_buy_plans
 from flight_optimizer.cash_fares import (
     DEFAULT_MAX_CACHE_AGE,
     DEFAULT_MAX_LAYOVER_MINUTES,
@@ -18,6 +19,7 @@ from flight_optimizer.enrichment import EnrichmentStats
 from flight_optimizer.itineraries import (
     CURRENT_AWARD_DAYS, STALE_AWARD_DAYS, Freshness, Itinerary, is_stale,
 )
+from flight_optimizer.promos import Promo, active_promos, best_promos
 from flight_optimizer.savings import TripBaseline, estimate_value
 from flight_optimizer.seats_aero import AwardResult, SeatsAeroClient
 
@@ -264,6 +266,53 @@ def _cash_ticket_lines(
     return lines
 
 
+def purchase_text(p: Purchase) -> str:
+    """One purchase, with the sale it uses (if any) and what retail would have cost."""
+    q = p.quote
+    text = (
+        f"buy {q.points_bought:,} {p.program} miles for about ${q.cost_usd:,.2f} "
+        f"({q.effective_cents_per_point:.2f} c each, short {p.shortfall:,})"
+    )
+    if q.kind != "retail":
+        until = f" until {q.promo_ends:%b %d}" if q.promo_ends else ""
+        best_case = ", BEST CASE: this sale's tiers are not known" if not q.tiers_known else ""
+        text += f" [{q.percent}% {q.kind} sale{until}{best_case}; retail ${p.retail_quote.cost_usd:,.2f}]"
+    if q.confidence == "low":
+        text += ", low-confidence price"
+    return text
+
+
+def _buy_lines(
+    misses: list[TripOption], today: date, limit: int, cash_total: int | None = None,
+    promos: dict[str, Promo] | None = None,
+) -> list[str]:
+    """Near-misses that buying miles would make affordable, with the cost of doing so."""
+    plans = rank_buy_plans(misses, today, promos)
+    shown: list[BuyPlan] = []
+    seen: set = set()
+    for plan in plans:  # same-shape date variants add nothing
+        shape = _shape(plan.option)
+        if shape not in seen:
+            seen.add(shape)
+            shown.append(plan)
+        if len(shown) == limit:
+            break
+    if not shown:
+        return []
+
+    lines = ["", f"GAPS YOU COULD CLOSE BY BUYING MILES  ({ESTIMATE_NOTE})"]
+    for plan in shown:
+        buys = "; ".join(purchase_text(p) for p in plan.purchases)
+        lines.append(
+            f"  {plan.option.total_miles:,} miles + ${plan.total_cost:,.2f}: {buys}"
+            f"   [{freshness_label(plan.option, today)}]"
+            + (f"   (cash ticket: ${cash_total:,})" if cash_total is not None else "")
+        )
+        for label, itinerary in zip(("out ", "back"), plan.option.itineraries):
+            lines.append(f"      {label}  {_itinerary_text(itinerary)}")
+    return lines
+
+
 def render_trip(
     trip: sqlite3.Row,
     gateways: list[str],
@@ -275,6 +324,8 @@ def render_trip(
     stats: EnrichmentStats | None = None,
     top_n: int = 5,
     near_n: int = 3,
+    buy_n: int = 3,
+    promos: dict[str, Promo] | None = None,
     today: date | None = None,
 ) -> str:
     today = today or date.today()
@@ -352,6 +403,7 @@ def render_trip(
             out.append(f"  {option.total_miles:,} miles   {_miss_text(option)}")
             for label, itinerary in zip(("out ", "back"), option.itineraries):
                 out.append(f"      {label}  {_itinerary_text(itinerary)}")
+    out.extend(_buy_lines(misses, today, buy_n, baseline.cabin_total if baseline is not None else None, promos))
     return "\n".join(out)
 
 
@@ -370,6 +422,7 @@ def build_report(
         return "No active trips. Mark a trip active to include it in the report."
 
     balances = db.get_balances(conn)
+    live_promos = best_promos(active_promos(conn, today or date.today()))
     sections = []
     for trip in trips:
         analysis = analyze_trip(conn, awards, cash, trip, balances)
@@ -377,7 +430,7 @@ def build_report(
             render_trip(
                 trip, analysis.gateways, analysis.ranked, analysis.baseline, balances,
                 cash_note=analysis.cash_note, stats=analysis.stats,
-                top_n=top_n, near_n=near_n, today=today,
+                top_n=top_n, near_n=near_n, promos=live_promos, today=today,
             )
         )
 

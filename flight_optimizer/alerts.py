@@ -11,9 +11,11 @@ from datetime import date, datetime, timedelta, timezone
 
 from flight_optimizer import db
 from flight_optimizer.affordability import TripOption, slow_transfers
+from flight_optimizer.buying import BuyPlan, promo_threshold_cents, rank_buy_plans
 from flight_optimizer.analysis import TripAnalysis
 from flight_optimizer.connections import ConnectionClass
 from flight_optimizer.itineraries import Freshness, is_stale
+from flight_optimizer.promos import Promo
 from flight_optimizer.savings import estimate_value
 
 RE_ALERT_DAYS = 7  # don't repeat the same option within this window unless it got cheaper
@@ -221,4 +223,102 @@ def record_sent(conn: sqlite3.Connection, alert: Alert, plan_path: str | None = 
         dedupe_key=alert.key,
         miles=alert.option.total_miles,
         details=plan_path,
+    )
+
+
+# --- buy-miles sale alerts --------------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PromoAlert:
+    """A sale that makes a near-miss option affordable at a good price."""
+
+    trip_id: int
+    plan: BuyPlan
+    key: str
+    title: str
+    message: str
+    click: str | None
+    priority: int
+    tags: tuple[str, ...]
+
+
+def qualifies(purchase) -> bool:
+    """A purchase is alert-worthy only if it uses a sale whose tiers are known and the price
+    per point is under the program's threshold. A headline-only sale is a best case, never alerted on."""
+    quote = purchase.quote
+    threshold = promo_threshold_cents(purchase.program)
+    return (
+        quote.kind != "retail" and quote.tiers_known and threshold is not None
+        and quote.effective_cents_per_point <= threshold
+    )
+
+
+def qualifying_plan(analysis: TripAnalysis, promos: dict[str, Promo], today: date) -> BuyPlan | None:
+    """The best near-miss that a live sale makes affordable at a good price.
+
+    Owner's three conditions: an active trip (analysis exists only for one), a sale under the
+    program's price threshold, and a balance that is short for the trip's redemption. Options
+    resting on stale data never qualify, matching the freshness rule for award alerts.
+    """
+    misses = [
+        o for o in analysis.ranked
+        if not o.affordability.affordable and o.freshness(today) is not Freshness.STALE
+    ]
+    for plan in rank_buy_plans(misses, today, promos):
+        if plan.uses_promo and all(qualifies(p) for p in plan.purchases):
+            return plan
+    return None
+
+
+def _promo_key(plan: BuyPlan) -> str:
+    sales = "+".join(sorted(p.quote.promo_url or p.quote.promo_title for p in plan.purchases))
+    return f"promo:{sales}:{option_key(plan.option)}"
+
+
+def build_promo_alert(analysis: TripAnalysis, plan: BuyPlan) -> PromoAlert:
+    from flight_optimizer.report import purchase_text  # local import: report imports this module's siblings
+
+    trip = analysis.trip
+    programs = ", ".join(p.program for p in plan.purchases)
+    lines = [
+        f"{trip['origin']} > {trip['destination']}  {_dates(trip)}",
+        f"A {programs} sale makes a {plan.option.total_miles:,}-mile option affordable.",
+    ]
+    lines += [f"- {purchase_text(p)}" for p in plan.purchases]
+    lines.append(f"Total: {plan.option.total_miles:,} miles + ${plan.total_cost:,.2f} (retail would be ${plan.retail_cost:,.2f}).")
+    oldest = oldest_data(plan.option)
+    if oldest:
+        lines.append(f"Award data as of {oldest}. Verify the flights before buying.")
+    lines.append("Details: python -m flight_optimizer promos")
+    click = next((p.quote.promo_url for p in plan.purchases if p.quote.promo_url), None)
+    return PromoAlert(
+        trip_id=trip["id"], plan=plan, key=_promo_key(plan),
+        title=f"{trip['name']}: {programs} sale closes a gap",
+        message="\n".join(lines), click=click, priority=3, tags=("moneybag",),
+    )
+
+
+def decide_promo_alert(
+    conn: sqlite3.Connection, analysis: TripAnalysis, promos: dict[str, Promo], *, now: datetime | None = None
+) -> PromoAlert | None:
+    """A promo alert for this trip, or None. Not repeated within `RE_ALERT_DAYS` unless cheaper."""
+    plan = qualifying_plan(analysis, promos, now.date() if now else date.today())
+    if plan is None:
+        return None
+    alert = build_promo_alert(analysis, plan)
+
+    last = db.last_alert(conn, analysis.trip["id"], alert.key)
+    if last is not None:
+        when = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        recent = when - _parse_time(last["created_at"]) < timedelta(days=RE_ALERT_DAYS)
+        cheaper = last["cash_price"] is not None and plan.total_cost < last["cash_price"]
+        if recent and not cheaper:
+            return None
+    return alert
+
+
+def record_promo_sent(conn: sqlite3.Connection, alert: PromoAlert) -> None:
+    db.record_alert(
+        conn, trip_id=alert.trip_id, alert_type="promo", dedupe_key=alert.key,
+        miles=alert.plan.option.total_miles, cash_price=alert.plan.total_cost,
     )

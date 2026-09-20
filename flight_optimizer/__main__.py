@@ -7,24 +7,33 @@
     python -m flight_optimizer test-notification    check that ntfy reaches your phone
     python -m flight_optimizer balance [PROGRAM MILES ...]   show balances, or set them
     python -m flight_optimizer gateways [TRIP] [--set|--add|--remove AIRPORT ...]   show or change hubs
+    python -m flight_optimizer promos [--no-fetch]   list buy-miles sales (reads the feeds first)
+    python -m flight_optimizer promos add PROGRAM --bonus N --ends YYYY-MM-DD [--tier ...]   record one by hand
 
 Add --fresh to any command to skip the 1-hour search cache.
 """
 
 import argparse
+import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from flight_optimizer import db
-from flight_optimizer.alerts import assess_urgency, decide_alert, record_sent, usable_for_alert
+from flight_optimizer.alerts import (
+    assess_urgency, decide_alert, decide_promo_alert, record_promo_sent, record_sent, usable_for_alert,
+)
 from flight_optimizer.analysis import analyze_trip
 from flight_optimizer.cash_fares import SerpApiClient
 from flight_optimizer.config import ConfigError, Settings, load_settings
 from flight_optimizer.itineraries import STALE_AWARD_DAYS
 from flight_optimizer.notify import NtfyClient, NtfyError
 from flight_optimizer.plans import latest_plan, render_plan, save_plan
+from flight_optimizer.promos import (
+    Promo, PromoSource, PromoTier, active_promos, best_promos, refresh_promos, save_promo,
+)
+from flight_optimizer.buying import RETAIL_PRICES
 from flight_optimizer.programs import PROGRAM_NAMES, format_balances, parse_miles, resolve_program
 from flight_optimizer.report import build_report
 from flight_optimizer.seats_aero import SeatsAeroClient, SeatsAeroError
@@ -36,6 +45,7 @@ class Clients:
     awards: SeatsAeroClient
     cash: SerpApiClient | None
     ntfy: NtfyClient | None
+    promos: PromoSource | None = None  # None: never go online for sales (tests, or by choice)
 
 
 def default_clients(settings: Settings, conn, fresh: bool = False) -> Clients:
@@ -47,6 +57,7 @@ def default_clients(settings: Settings, conn, fresh: bool = False) -> Clients:
         ),
         cash=SerpApiClient(settings.serpapi_api_key) if settings.serpapi_api_key else None,
         ntfy=NtfyClient(settings.ntfy_topic, server=settings.ntfy_server) if settings.ntfy_topic else None,
+        promos=PromoSource(),
     )
 
 
@@ -77,6 +88,22 @@ def _build_parser() -> argparse.ArgumentParser:
 
     commands.add_parser("test-notification", help="send a test message to your ntfy topic")
 
+    promos = commands.add_parser("promos", help="list buy-miles sales, refreshing them first")
+    promos.add_argument("--no-fetch", action="store_true", help="list what is stored without going online")
+    actions = promos.add_subparsers(dest="promo_action")
+    add = actions.add_parser("add", help="record a sale you saw on a program's own site")
+    add.add_argument("program")
+    kind = add.add_mutually_exclusive_group(required=True)
+    kind.add_argument("--bonus", type=int, metavar="PERCENT", help="extra points on top of what you buy")
+    kind.add_argument("--discount", type=int, metavar="PERCENT", help="a lower price for the same points")
+    add.add_argument("--ends", required=True, metavar="YYYY-MM-DD")
+    add.add_argument("--tier", action="append", default=[], metavar="MIN-MAX:PERCENT",
+                     help="a purchase tier, e.g. 5000-25000:50 or 80000+:100 (repeatable). Without tiers the "
+                          "sale is a best case and never alerts")
+    add.add_argument("--url", default="", help="the sale's page, opened when you tap an alert")
+    remove = actions.add_parser("remove", help="remove the sales you added by hand for a program")
+    remove.add_argument("program")
+
     balance = commands.add_parser(
         "balance", help="show your balances, or set them: balance PROGRAM MILES [PROGRAM MILES ...]"
     )
@@ -104,6 +131,21 @@ def _pick_trip(conn, trip_id: int | None):
     raise LookupError(f"Say which trip: {names}")
 
 
+def _send(conn, clients: Clients, trip, alert, *, dry_run: bool, describe: str) -> bool:
+    """Print (dry run) or deliver one alert. False if it could not be delivered."""
+    if dry_run:
+        print(f"--- would send for {trip['name']}: {describe} (priority {alert.priority}) ---")
+        print(alert.title)
+        print(alert.message)
+        return True
+    try:
+        clients.ntfy.send(alert.message, title=alert.title, priority=alert.priority, tags=alert.tags, click=alert.click)
+    except NtfyError as exc:
+        print(f"{trip['name']}: could not send the {describe}: {exc}", file=sys.stderr)
+        return False  # not recorded, so the next run tries again
+    return True
+
+
 def _run_notify(conn, clients: Clients, plans_dir: Path, *, dry_run: bool, now: datetime) -> int:
     trips = db.active_trips(conn)
     if not trips:
@@ -113,10 +155,17 @@ def _run_notify(conn, clients: Clients, plans_dir: Path, *, dry_run: bool, now: 
         print("error: NTFY_TOPIC is not set. Add it to .env (see .env.example).", file=sys.stderr)
         return 1
 
+    if clients.promos is not None:
+        refreshed = refresh_promos(conn, clients.promos, now)
+        for problem in refreshed.errors:
+            print(f"note: could not read a sales source: {problem}", file=sys.stderr)
+    live_promos = best_promos(active_promos(conn, now.date()))
+
     balances = db.get_balances(conn)
     failed = False
     for trip in trips:
         analysis = analyze_trip(conn, clients.awards, clients.cash, trip, balances)
+
         alert = decide_alert(conn, analysis, now=now)
         if alert is None:
             if analysis.affordable and not usable_for_alert(analysis, now.date()):
@@ -126,26 +175,26 @@ def _run_notify(conn, clients: Clients, plans_dir: Path, *, dry_run: bool, now: 
                 )
             else:
                 print(f"{trip['name']}: nothing new to alert on.")
-            continue
-        if dry_run:
-            print(f"--- would send for {trip['name']} (priority {alert.priority}) ---")
-            print(alert.title)
-            print(alert.message)
-            continue
+        elif dry_run:
+            _send(conn, clients, trip, alert, dry_run=True, describe="award alert")
+        else:
+            # Save the plan first, so the alert's "full steps" pointer is always valid.
+            plan_text = render_plan(analysis, alert.option, balances=balances, generated_at=now, urgency=alert.urgency)
+            path = save_plan(plan_text, trip, generated_at=now, directory=plans_dir)
+            if _send(conn, clients, trip, alert, dry_run=False, describe="award alert"):
+                record_sent(conn, alert, str(path))
+                print(f"{trip['name']}: alert sent ({alert.urgency.label}). Plan saved to {path}")
+            else:
+                failed = True
 
-        # Save the plan first, so the alert's "full steps" pointer is always valid.
-        plan_text = render_plan(analysis, alert.option, balances=balances, generated_at=now, urgency=alert.urgency)
-        path = save_plan(plan_text, trip, generated_at=now, directory=plans_dir)
-        try:
-            clients.ntfy.send(
-                alert.message, title=alert.title, priority=alert.priority, tags=alert.tags, click=alert.click
-            )
-        except NtfyError as exc:
-            print(f"{trip['name']}: could not send the alert: {exc}", file=sys.stderr)
-            failed = True  # not recorded, so the next run tries again
-            continue
-        record_sent(conn, alert, str(path))
-        print(f"{trip['name']}: alert sent ({alert.urgency.label}). Plan saved to {path}")
+        promo_alert = decide_promo_alert(conn, analysis, live_promos, now=now)
+        if promo_alert is not None:
+            if _send(conn, clients, trip, promo_alert, dry_run=dry_run, describe="sale alert"):
+                if not dry_run:
+                    record_promo_sent(conn, promo_alert)
+                    print(f"{trip['name']}: sale alert sent ({promo_alert.title}).")
+            else:
+                failed = True
     return 1 if failed else 0
 
 
@@ -246,6 +295,85 @@ def _run_gateways(conn, args) -> int:
     return 0
 
 
+_TIER_ARG = re.compile(r"^(\d[\d,]*)(?:-(\d[\d,]*)|(\+))?:(\d{1,3})$")
+
+
+def _parse_tier_arg(text: str) -> PromoTier:
+    match = _TIER_ARG.match(text.strip())
+    if not match or (match.group(2) is None and match.group(3) is None):
+        raise ValueError(f"Tier {text!r} should look like 5000-25000:50 or 80000+:100.")
+    low = parse_miles(match.group(1))
+    high = parse_miles(match.group(2)) if match.group(2) else None
+    if high is not None and high < low:
+        raise ValueError(f"Tier {text!r}: the top is below the bottom.")
+    return PromoTier(low, high, int(match.group(4)))
+
+
+def _promo_line(promo: Promo) -> str:
+    sale = f"{'up to ' if promo.tiers_known or promo.source != 'manual' else ''}{promo.headline_percent}% {promo.kind}"
+    if promo.tiers:
+        detail = " | ".join(
+            f"{t.min_points:,}{'+' if t.max_points is None else '-' + format(t.max_points, ',')}: {t.percent}%"
+            for t in promo.tiers
+        )
+    else:
+        detail = "headline only: the real bonus for a small purchase is unknown"
+    ends = promo.ends.isoformat() if promo.ends else "no end date"
+    return f"{PROGRAM_NAMES.get(promo.program, promo.program):<30} {sale:<20} {ends:<12} {detail}   [{promo.source}]"
+
+
+def _run_promos(conn, args, clients: Clients, now: datetime) -> int:
+    today = now.date()
+    action = getattr(args, "promo_action", None)
+
+    if action == "remove":
+        program = resolve_program(args.program)
+        removed = db.delete_manual_promos(conn, program)
+        print(f"Removed {removed} hand-added sale(s) for {PROGRAM_NAMES[program]}." if removed
+              else f"No hand-added sales for {PROGRAM_NAMES[program]}.")
+        return 0
+
+    if action == "add":
+        program = resolve_program(args.program)
+        try:
+            ends = date.fromisoformat(args.ends)
+        except ValueError:
+            raise ValueError(f"--ends {args.ends!r} should look like 2026-09-30.") from None
+        percent = args.bonus if args.bonus is not None else args.discount
+        if not 1 <= percent <= 300:
+            raise ValueError("The percent should be between 1 and 300.")
+        kind = "bonus" if args.bonus is not None else "discount"
+        tiers = tuple(sorted((_parse_tier_arg(t) for t in args.tier), key=lambda t: t.min_points))
+        save_promo(conn, Promo(
+            key=f"manual:{program}:{ends.isoformat()}", program=program, kind=kind, headline_percent=percent,
+            tiers=tiers, ends=ends, title=f"Added by hand: {percent}% {kind}", url=args.url, source="manual",
+            last_seen=today,
+        ))
+        print(f"Recorded a {percent}% {kind} sale for {PROGRAM_NAMES[program]} ending {ends}.")
+        if not tiers:
+            print("No tiers given, so it is treated as a best case and will not trigger alerts. "
+                  "Add --tier options from the sale's page to price it properly.")
+        if program not in RETAIL_PRICES:
+            print(f"Note: {PROGRAM_NAMES[program]} has no retail price on file, so it cannot be used in cost estimates.")
+        return 0
+
+    if not args.no_fetch and clients.promos is not None:
+        result = refresh_promos(conn, clients.promos, now, force=True)
+        print(f"Read {result.pages_read} roundup page(s); {result.new_or_updated} sale(s) found or refreshed.")
+        for problem in result.errors:
+            print(f"  could not read: {problem}", file=sys.stderr)
+    promos = sorted(best_promos(active_promos(conn, today)).values(), key=lambda p: p.program)
+    if not promos:
+        print("No live buy-miles sales on record.")
+        return 0
+    print(f"{'Program':<30} {'Sale':<20} {'Ends':<12} Tiers")
+    for promo in promos:
+        print(_promo_line(promo))
+    print("\nSales are read from deal sites' prose, so confirm terms on the program's page. "
+          "See what they mean for your trips with: python -m flight_optimizer report")
+    return 0
+
+
 def main(
     argv: list[str] | None = None,
     *,
@@ -294,6 +422,12 @@ def main(
             )
             print("Test notification sent. Check your phone.")
             return 0
+        if args.command == "promos":
+            try:
+                return _run_promos(conn, args, clients, now)
+            except ValueError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
         if args.command == "notify":
             return _run_notify(conn, clients, plans_dir, dry_run=args.dry_run, now=now)
         if args.command == "plan":

@@ -98,15 +98,27 @@ Free, no balance needed. Status column mirrors the README table.
 
 Separate alert type. It depends on at least one active trip.
 
-- [ ] Choose sources: RSS or scraping for The Points Guy, Doctor of Credit, One Mile at a Time
-- [ ] Filter posts for "buy miles" plus a program name
-- [ ] Hardcode a "normal price" baseline (¢/mile) per program, since no structured feed exists (README open question)
-- [ ] Convert bonus % into effective ¢/mile
-- [ ] Alert only when all three hold:
-  - [ ] At least one trip is `active`
-  - [ ] Effective ¢/mile is below the threshold for that program
-  - [ ] Current balance is short of what the active trip's business-class redemption needs
-- [ ] Set per-program ¢/mile thresholds (e.g. LifeMiles ≤ ~1.5¢ against a normal ~2.5–3¢)
+- [x] Choose sources (researched 2026-09-20, all read-only): **Live From A Lounge** is the best fit. Its RSS feed carries structured titles such as "Deal: Buy Aeroplan miles with up to 100% Bonus through September 25, 2026" (program, bonus and end date in the title), and a weekly roundup page ("15 great miles and points buying opportunities available as of ...") lists every current offer with its purchase tiers and end date. Secondary: Doctor of Credit's main feed (titles like "Aeroplan: Buy Miles & Get Up To 115% Bonus"), but its buy-miles tag feed was abandoned in 2022.
+  - Rejected: One Mile at a Time (search feed 404), The Points Guy (search returns HTML, not a feed), Frequent Miler (aggregate "Current Deals" posts, noisy prose). WordPress search feeds work on Doctor of Credit and Frequent Miler but return mostly unrelated posts.
+  - Every feed only holds the last 3 to 5 days (10 to 25 posts), so poll daily and store the posts already seen. Be polite: one feed fetch a day, article pages only when needed, an identifying User-Agent.
+  - Promos are prose, not data, and the headline is misleading for small purchases. Bonuses are tiered by purchase size (Aeroplan: 5k-25k gets 50%, 30k-75k gets 75%, 80k+ gets 100%; LifeMiles: 1k-20k 125%, 21k-50k 135%, 51k-200k 145%), and some offers are targeted ("varies per customer"). A 3,000-mile top-up gets the lowest tier, so "up to 145%" is the wrong number to use.
+  - Live on 2026-09-20: Delta up to 50% bonus through Sept 30 (2.51 cents per mile at the top tier vs 3.76 retail including the 7.5% excise tax; minimum 2,000 miles, in steps of 2,000), Aeroplan up to 100% and LifeMiles up to 145% through Sept 25, JetBlue up to 120%, United up to 100%.
+  - Retail (no-promo) prices seen: Delta and United 3.76 cents per mile including tax; American 2.25 to 3.76; Aeroplan and LifeMiles imply base prices near 2.7 and 3.3 cents (1.35 cents at the top tier divided by the bonus). These need verifying before they become baselines.
+- [x] **Buy-to-close-gap analysis**: the report's "GAPS YOU COULD CLOSE BY BUYING MILES" section, ranked current data first then cheapest, each with the cash ticket price beside it and any sale applied. On 2026-09-20 buying is a poor deal for every current-data option (the best is $541.80 in a best-case American discount on top of 100,000 miles, against a $2,267 cash ticket). The $150.50 Delta gap sits behind stale data.
+- [ ] **Delta's live sale is not in any feed I can read** (announced Sept 13, before the feeds' 3-day window; LoyaltyLobby's article and search are blocked). Record it by hand with the real tiers from Delta's page: `python -m flight_optimizer promos add delta --bonus 50 --ends 2026-09-30 --tier 2000-9000:PERCENT ...`. Until then Delta gaps are priced at retail.
+- [ ] Most programs you could be short in (Delta, United, American) only have a headline in the roundup, so their sales are best cases and never alert. Read tiers from each program's own sale page, or from the individual deal posts the roundup links to (not done: fetching those pages).
+- [ ] Sales can be targeted ("varies per customer"): the terms you are offered may differ from the article. Always confirm on the program's page while logged in.
+- [ ] Gaps in the Capital One pool are not priced: an option short in Capital One miles could instead buy points directly in the transfer program (Aeroplan, LifeMiles, Virgin) during a sale. `plan_purchases` returns None for those today.
+- [ ] Compare buying against transferring: during a sale, buying Aeroplan points directly (about 1.35 to 1.8 cents) versus spending Capital One miles (worth at least 1 cent each as travel credit) is a real trade-off the report does not yet weigh.
+- [ ] Delta's purchase block size (2,000) and other block sizes and annual limits come from single sources: verify on each program's buy page.
+- [x] Filter posts (`promos.py`): a title must have a buy verb and a miles/points word and name a tracked airline; hotel programs, card offers (American Express is not American Airlines), expired posts and untracked programs are ignored. Sources: Live From A Lounge (feed titles plus the weekly roundup page, which carries the tier tables), Doctor of Credit and LoyaltyLobby (titles). A refresh is limited to once every 6 hours, reads each roundup page once, and one broken source does not stop the others.
+- [x] Retail price table (`buying.RETAIL_PRICES`), verified 2026-09-20 against several secondary sources: US carriers 3.5 cents + 7.5% excise tax (Delta, United, American, Atmos; JetBlue 3.0 + tax), Aeroplan about 2.7 USD cents (3.75 CAD, moves with FX), LifeMiles 3.3, Avios 3.25 (tiered), Flying Blue 3.05 (euros), Virgin 2.5. Arithmetic cross-checks held (Delta's promo total is exactly 60,000 x 3.5c x 1.075). Confidence is medium for the US carriers and LifeMiles, low for the FX-priced and tiered programs. Qantas and Southwest are deliberately unpriced. All are ESTIMATES: the airlines' own pages were not read.
+- [x] Effective cents per point (`buying.quote_purchase`): reads the tier for the size of the *purchase* (a small top-up gets the lowest tier), rounds up to the program's block size, respects annual limits, picks the smallest purchase that covers the gap, and compares against retail. A headline-only sale is priced as a labelled BEST CASE.
+- [x] Sale alerts (`alerts.decide_promo_alert`) fire only when all hold: an active trip; a live sale with KNOWN tiers whose price per point is under the program's threshold on every purchase in the plan; and a balance that is short for that trip's option. Options resting on stale data never qualify. A repeat is suppressed for 7 days unless cheaper. Verified on live data: no alert today, because the only sales with known tiers (Aeroplan, LifeMiles, JetBlue) are for programs you are not short in.
+  - [x] At least one trip is `active`
+  - [x] Effective ¢/mile is below the threshold for that program
+  - [x] Current balance is short of what the active trip's business-class redemption needs
+- [x] Thresholds: 70% of the retail price per point (`PROMO_ALERT_FRACTION`), with LifeMiles overridden to 1.5 cents (the README's example). Both are constants in `buying.py` to tune.
 
 ## 4. v2: multiple trips and price history
 

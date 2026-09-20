@@ -121,6 +121,18 @@ def test_baseline_limits_are_inclusive_and_configurable():
     assert cheapest_reasonable(fares, max_total_minutes=899) is None
 
 
+def test_baseline_never_uses_a_layover_of_an_hour_or_less():
+    fares = [
+        fare(300, layovers=(60,)),        # exactly 1 hour
+        fare(310, layovers=(45, 200)),    # one short connection is enough to exclude it
+        fare(320, layovers=(61,)),        # just over 1 hour is allowed (the report warns)
+        fare(900, layovers=(180,)),
+    ]
+
+    assert cheapest_reasonable(fares).price == 320
+    assert cheapest_reasonable([fares[0], fares[1]]) is None
+
+
 def test_baseline_prefers_shorter_trip_on_equal_price_and_handles_none():
     fares = [fare(323, total=739), fare(323, total=712)]
 

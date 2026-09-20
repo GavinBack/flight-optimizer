@@ -9,7 +9,8 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-from flight_optimizer import db
+from flight_optimizer import connections, db
+from flight_optimizer.connections import ConnectionClass
 from flight_optimizer.seats_aero import AwardResult, Cabin, SeatsAeroClient
 
 
@@ -48,6 +49,25 @@ class Itinerary:
         first, second = self.legs
         same_ticket = first.source == second.source and first.date == second.date
         return 0 if same_ticket else 1
+
+    @property
+    def connection_minutes(self) -> int | None:
+        """Time at the hub between the legs, or None if there is no connection or the
+        flight times haven't been looked up."""
+        if len(self.legs) != 2:
+            return None
+        first, second = self.legs
+        if first.arrives_at is None or second.departs_at is None:
+            return None
+        return connections.connection_minutes(first.arrives_at, second.departs_at)
+
+    @property
+    def connection_class(self) -> ConnectionClass | None:
+        """None when there is no connection or the times are unknown."""
+        if self.connection_minutes is None:
+            return None
+        first, second = self.legs
+        return connections.classify(first.arrives_at, second.departs_at)
 
     @property
     def miles_by_program(self) -> dict[str, int]:

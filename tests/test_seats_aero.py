@@ -177,3 +177,81 @@ def test_other_http_errors_raise_generic_error_with_status():
     with pytest.raises(SeatsAeroError) as excinfo:
         search(client)
     assert excinfo.value.status_code == 500
+
+
+# --- trips lookup (flight-level details) -----------------------------------------
+
+from datetime import datetime  # noqa: E402
+
+from flight_optimizer.seats_aero import parse_trips  # noqa: E402
+
+
+def trips_body():
+    """Trimmed from a real /trips response (LAX-SJO on Aeroplan)."""
+    return {
+        "data": [
+            {"Cabin": "business", "MileageCost": 25000, "RemainingSeats": 5, "Stops": 0,
+             "DepartsAt": "2027-01-09T13:40:00Z", "ArrivesAt": "2027-01-09T23:15:00Z",
+             "FlightNumbers": "AV641", "TotalDuration": 455, "TotalTaxes": 10600,
+             "TaxesCurrency": "CAD", "UpdatedAt": "2026-09-18T01:33:05Z"},
+            {"Cabin": "business", "MileageCost": "25000", "RemainingSeats": 2, "Stops": 1,
+             "DepartsAt": "2027-01-09T13:40:00Z", "ArrivesAt": "2027-01-10T08:35:00Z",
+             "FlightNumbers": "AV641, AV655", "TotalDuration": 1015, "TotalTaxes": 10970,
+             "TaxesCurrency": "CAD"},
+            {"Cabin": "economy", "MileageCost": 15000, "RemainingSeats": 9, "Stops": 0,
+             "DepartsAt": "2027-01-09T13:40:00Z", "ArrivesAt": "2027-01-09T23:15:00Z"},
+            {"Cabin": "lounge", "MileageCost": 1, "DepartsAt": "2027-01-09T13:40:00Z", "ArrivesAt": "2027-01-09T23:15:00Z"},
+            {"Cabin": "business", "MileageCost": 0, "DepartsAt": "2027-01-09T13:40:00Z", "ArrivesAt": "2027-01-09T23:15:00Z"},
+            {"Cabin": "business", "MileageCost": 9000, "ArrivesAt": "2027-01-09T23:15:00Z"},
+        ],
+        "booking_links": [
+            {"label": "Book via United MileagePlus", "link": "https://united.test/x", "primary": False},
+            {"label": "Book via Air Canada Aeroplan", "link": "https://aircanada.test/x", "primary": True},
+        ],
+    }
+
+
+def test_parse_trips_reads_flights_and_skips_unusable_entries():
+    details = parse_trips(trips_body())
+
+    assert [(o.cabin, o.miles, o.seats, o.stops) for o in details.options] == [
+        (Cabin.BUSINESS, 25_000, 5, 0),
+        (Cabin.BUSINESS, 25_000, 2, 1),   # string cost is converted
+        (Cabin.ECONOMY, 15_000, 9, 0),
+    ]  # unknown cabin, zero cost and missing time are all skipped
+    first = details.options[0]
+    assert first.flight_numbers == "AV641" and first.total_taxes == 10_600 and first.currency == "CAD"
+
+
+def test_parse_trips_times_are_naive_local_times_despite_the_z_suffix():
+    first = parse_trips(trips_body()).options[0]
+
+    assert first.departs_at == datetime(2027, 1, 9, 13, 40) and first.departs_at.tzinfo is None
+    assert first.arrives_at == datetime(2027, 1, 9, 23, 15)
+
+
+def test_parse_trips_uses_the_primary_booking_link():
+    details = parse_trips(trips_body())
+
+    assert details.booking_url == "https://aircanada.test/x"
+    assert ("Book via United MileagePlus", "https://united.test/x") in details.booking_links
+
+
+def test_parse_trips_without_links_or_data_is_empty_not_an_error():
+    details = parse_trips({})
+
+    assert details.options == () and details.booking_url == "" and details.booking_links == ()
+
+
+def test_client_trips_calls_the_trips_endpoint_with_the_row_id():
+    client, session = make_client(FakeResponse(trips_body()))
+
+    details = client.trips("abc123")
+
+    assert session.requests[0]["url"] == "https://seats.aero/partnerapi/trips/abc123"
+    assert session.requests[0]["headers"] == {"Partner-Authorization": "test-key"}
+    assert len(details.options) == 3
+
+
+def test_parse_availability_keeps_the_row_id_for_later_lookups():
+    assert parse_availability(make_row("row-42"))[0].availability_id == "row-42"

@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -9,18 +9,19 @@ from flight_optimizer.cash_fares import CashFare, CashSearch, SerpApiError
 from flight_optimizer.itineraries import Itinerary
 from flight_optimizer.report import build_report, render_trip
 from flight_optimizer.savings import TripBaseline
-from flight_optimizer.seats_aero import AwardResult, Cabin
+from flight_optimizer.enrichment import EnrichmentStats
+from flight_optimizer.seats_aero import AwardResult, Cabin, FlightOption, TripDetails
 
 JAN9, JAN10, JAN16 = date(2027, 1, 9), date(2027, 1, 10), date(2027, 1, 16)
 TODAY = date(2026, 9, 20)
 BALANCES = {"capital_one": 115_519, "american": 26_115, "delta": 14_049, "aeroplan": 0}
 
 
-def leg(origin, dest, source, miles, on, *, direct=True, seats=2, updated="2026-09-19T00:00:00Z"):
+def leg(origin, dest, source, miles, on, *, direct=True, seats=2, updated="2026-09-19T00:00:00Z", aid="", departs=None, arrives=None):
     return AwardResult(
         source=source, origin=origin, destination=dest, date=on, cabin=Cabin.BUSINESS,
         miles=miles, total_taxes=0, currency="USD", remaining_seats=seats, airlines="XX",
-        direct=direct, updated_at=updated,
+        direct=direct, updated_at=updated, availability_id=aid, departs_at=departs, arrives_at=arrives,
     )
 
 
@@ -74,7 +75,7 @@ def test_header_and_baseline_section(conn):
 
     assert "Costa Rica   RNO > SJO   Jan 09 2027 - Jan 16 2027   (business)" in text
     assert "Via gateways: DEN, LAX" in text
-    assert "layovers <= 4h, total <= 15h" in text
+    assert "layovers over 1h and up to 4h, total <= 15h" in text
     assert "TOTAL $2,267" in text and "TOTAL $699" in text
     assert "business costs $1,568 more than economy" in text
 
@@ -94,7 +95,7 @@ def test_same_shape_date_variants_are_collapsed(conn):
 
     text = render(conn, ranked)
 
-    assert text.count("#") == 1
+    assert sum(1 for line in text.splitlines() if line.startswith("#")) == 1
     assert "(+1 other date combination at the same price)" in text
 
 
@@ -122,7 +123,7 @@ def test_clean_option_has_no_check_line(conn):
         [leg("SJO", "LAX", "aeroplan", 25_000, JAN16), leg("LAX", "RNO", "delta", 3_000, date(2027, 1, 17))],
     )
 
-    assert "check:" not in render(conn, [clean])
+    assert "check:" not in render(conn, [clean], baseline=None)
 
 
 def one_ticket_option():
@@ -220,9 +221,13 @@ def test_top_n_limits_the_options_shown(conn):
 class FakeAwards:
     calls_remaining = 950
 
-    def __init__(self, table=None):
+    def __init__(self, table=None, details=None):
         self.table = table or {}
+        self.details = details or {}
         self.calls = []
+
+    def trips(self, availability_id):
+        return self.details[availability_id]
 
     def search(self, origin, destination, start, end, **_):
         self.calls.append((origin, destination))
@@ -238,17 +243,39 @@ class FakeCash:
         self.searches_made += 1
         if self.error:
             raise self.error
-        return CashSearch(fares=(fare(1000 if cabin is Cabin.BUSINESS else 300, 600, (60,)),),
+        return CashSearch(fares=(fare(1000 if cabin is Cabin.BUSINESS else 300, 600, (120,)),),
                           lowest_price=None, typical_range=None,
                           fetched_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
 
 
 AWARD_TABLE = {
-    ("RNO", "LAX"): [leg("RNO", "LAX", "delta", 10_900, JAN9)],
-    ("LAX", "SJO"): [leg("LAX", "SJO", "aeroplan", 25_000, JAN9)],
-    ("SJO", "LAX"): [leg("SJO", "LAX", "aeroplan", 25_000, JAN16)],
-    ("LAX", "RNO"): [leg("LAX", "RNO", "delta", 10_900, JAN16)],
+    ("RNO", "LAX"): [leg("RNO", "LAX", "delta", 10_900, JAN9, aid="RL")],
+    ("LAX", "SJO"): [leg("LAX", "SJO", "aeroplan", 25_000, JAN9, aid="LS")],
+    ("SJO", "LAX"): [leg("SJO", "LAX", "aeroplan", 25_000, JAN16, aid="SL")],
+    ("LAX", "RNO"): [leg("LAX", "RNO", "delta", 10_900, JAN16, aid="LR")],
 }
+
+
+def flight_details(miles, departs, arrives, url="https://book.example/x"):
+    option = FlightOption(
+        cabin=Cabin.BUSINESS, miles=miles, seats=2, departs_at=departs, arrives_at=arrives,
+        flight_numbers="XX100", stops=0, total_duration=180, total_taxes=0, currency="USD",
+        updated_at="2026-09-19T00:00:00Z",
+    )
+    return TripDetails(options=(option,), booking_url=url, booking_links=(("Book", url),))
+
+
+def connecting_details(day):
+    """Lands at LAX at 10:00 and the onward flight leaves at 14:00: a comfortable 4 hours."""
+    at = lambda h: datetime(day.year, day.month, day.day, h)
+    return {
+        "RL": flight_details(10_900, at(7), at(10)), "LS": flight_details(25_000, at(14), at(20)),
+        "SL": flight_details(25_000, datetime(2027, 1, 16, 7), datetime(2027, 1, 16, 10)),
+        "LR": flight_details(10_900, datetime(2027, 1, 16, 14), datetime(2027, 1, 16, 16)),
+    }
+
+
+ALL_DETAILS = {**connecting_details(JAN9), "SL": connecting_details(JAN16)["SL"], "LR": connecting_details(JAN16)["LR"]}
 
 
 def test_no_active_trips_message(conn):
@@ -263,7 +290,7 @@ def test_report_covers_active_trips_only_and_shows_usage(conn):
     db.set_gateways(conn, active["id"], ["LAX"])
     db.set_balance(conn, "delta", 30_000)
     db.set_balance(conn, "capital_one", 100_000)
-    awards, cash = FakeAwards(AWARD_TABLE), FakeCash()
+    awards, cash = FakeAwards(AWARD_TABLE, ALL_DETAILS), FakeCash()
 
     text = build_report(conn, awards, cash, today=TODAY)
 
@@ -286,7 +313,7 @@ def test_report_without_a_cash_client_says_so(conn):
 def test_cash_failure_degrades_instead_of_crashing(conn):
     add_trip(conn)
 
-    text = build_report(conn, FakeAwards(AWARD_TABLE), FakeCash(error=SerpApiError("quota gone")), today=TODAY)
+    text = build_report(conn, FakeAwards(AWARD_TABLE, ALL_DETAILS), FakeCash(error=SerpApiError("quota gone")), today=TODAY)
 
     assert "Cash prices unavailable: quota gone" in text
     assert "CLOSEST MISSES" in text or "BEST AFFORDABLE OPTIONS" in text
@@ -308,3 +335,121 @@ def test_cli_with_no_active_trips_makes_no_network_calls(monkeypatch, tmp_path, 
 
     assert main(["--top", "3"], env_file=None) == 0
     assert "No active trips" in capsys.readouterr().out
+
+
+# --- flight times, connection warnings, stats, cash through-ticket ------------------
+
+def timed_option(connect_minutes, *, same_day=True):
+    """Outbound lands at LAX at 10:00; the onward flight leaves `connect_minutes` later."""
+    land = datetime(2027, 1, 9, 10, 0)
+    out = [
+        leg("RNO", "LAX", "delta", 10_900, JAN9, departs=land - timedelta(hours=2), arrives=land, aid="a"),
+        leg("LAX", "SJO", "delta", 25_000, JAN9 if same_day else JAN10,
+            departs=land + timedelta(minutes=connect_minutes), arrives=land + timedelta(minutes=connect_minutes, hours=5)),
+    ]
+    back_land = datetime(2027, 1, 16, 10, 0)
+    back = [
+        leg("SJO", "LAX", "delta", 25_000, JAN16, departs=back_land - timedelta(hours=4), arrives=back_land),
+        leg("LAX", "RNO", "delta", 10_900, JAN16, departs=back_land + timedelta(hours=4), arrives=back_land + timedelta(hours=6)),
+    ]
+    return option(out, back, {"delta": 500_000, "capital_one": 0})
+
+
+def test_legs_show_local_times_flight_numbers_and_the_connection_buffer(conn):
+    o = timed_option(200)
+    text = render(conn, [o])
+
+    assert "RNO>LAX Jan 09 08:00-10:00" in text
+    assert "LAX>SJO Jan 09 13:20-18:20" in text
+    assert "[3h20m at LAX]" in text and "[4h00m at LAX]" in text
+
+
+def test_a_tight_connection_warns_with_the_actual_time(conn):
+    text = render(conn, [timed_option(95)])
+
+    assert "tight connection at LAX 1h35m (over 1 hour but under 2.5 hours between flights)" in text
+
+
+def test_a_comfortable_connection_does_not_warn(conn):
+    text = render(conn, [timed_option(150)], baseline=None)
+
+    assert "tight connection" not in text and "flight times not checked" not in text
+
+
+def test_an_overnight_stop_is_called_out(conn):
+    o = timed_option(24 * 60, same_day=False)
+
+    assert "overnight stop at LAX (24h00m)" in render(conn, [o], baseline=None)
+
+
+def test_untimed_same_day_options_still_say_times_were_not_checked(conn):
+    assert "flight times not checked" in render(conn, [best_option()])
+
+
+def test_stats_line_reports_lookups_and_what_was_dropped(conn):
+    stats = EnrichmentStats(lookups=14, dropped_unsafe=3, unverifiable=2, budget_reached=True)
+
+    text = render(conn, [best_option()], stats=stats)
+
+    assert "Flight times checked for the leading options (14 lookups)" in text
+    assert "3 dropped for a connection of 1 hour or less" in text
+    assert "2 skipped for lack of usable flight details" in text
+    assert "stopped early to protect the API quota" in text
+
+
+def test_no_stats_line_when_nothing_was_looked_up(conn):
+    assert "Flight times checked" not in render(conn, [best_option()], stats=EnrichmentStats())
+
+
+def test_cash_through_ticket_is_listed_next_to_the_awards(conn):
+    text = render(conn, [best_option()])
+
+    assert "CASH THROUGH-TICKET" in text and "one booking each way" in text
+    assert text.index("BEST AFFORDABLE OPTIONS") < text.index("CASH THROUGH-TICKET")
+    assert "vs award #1: 85,900 miles on 4 separate bookings" in text
+
+
+def test_cash_through_ticket_warns_about_short_layovers(conn):
+    text = render(conn, [best_option()])
+
+    assert "layover under 2.5 hours: out 1h25m, ret 2h28m, ret 1h18m" in text
+
+
+def test_cash_through_ticket_is_omitted_when_no_fare_exists(conn):
+    no_fare = TripBaseline(cabin_fares=(None, None), economy_fares=(None, None))
+
+    assert "CASH THROUGH-TICKET" not in render(conn, [best_option()], baseline=no_fare)
+    assert "CASH THROUGH-TICKET" not in render(conn, [best_option()], baseline=None)
+
+
+def test_cash_ticket_is_shown_even_when_no_award_is_affordable(conn):
+    text = render(conn, [])
+
+    assert "CASH THROUGH-TICKET" in text and "vs award #1" not in text
+
+
+def test_build_report_verifies_flight_times_and_shows_the_booking_data(conn):
+    add_trip(conn)
+    db.set_gateways(conn, 1, ["LAX"])
+    db.set_balance(conn, "delta", 30_000)
+    db.set_balance(conn, "capital_one", 100_000)
+
+    text = build_report(conn, FakeAwards(AWARD_TABLE, ALL_DETAILS), FakeCash(), today=TODAY)
+
+    assert "RNO>LAX Jan 09 07:00-10:00" in text and "[4h00m at LAX]" in text
+    assert "Flight times checked" in text
+
+
+def test_build_report_drops_options_whose_connection_is_an_hour_or_less(conn):
+    add_trip(conn)
+    db.set_gateways(conn, 1, ["LAX"])
+    db.set_balance(conn, "delta", 30_000)
+    db.set_balance(conn, "capital_one", 100_000)
+    details = dict(ALL_DETAILS)
+    at = lambda h, m=0: datetime(2027, 1, 9, h, m)
+    details["LS"] = flight_details(25_000, at(10, 45), at(16))  # 45 minutes after landing
+
+    text = build_report(conn, FakeAwards(AWARD_TABLE, details), None, today=TODAY)
+
+    assert "0 of 0 combinations" in text
+    assert "1 dropped for a connection of 1 hour or less" in text

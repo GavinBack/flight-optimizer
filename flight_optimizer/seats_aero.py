@@ -6,7 +6,7 @@ Results are cached snapshots, not live: check `AwardResult.updated_at`.
 """
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from enum import Enum
 
 import requests
@@ -53,6 +53,12 @@ class AwardResult:
     airlines: str
     direct: bool
     updated_at: str  # when Seats.aero last refreshed this row
+    # Filled in only after a trips lookup (see FlightOption / SeatsAeroClient.trips).
+    availability_id: str = ""  # Seats.aero row id, needed for that lookup
+    departs_at: datetime | None = None  # local time at the origin airport
+    arrives_at: datetime | None = None  # local time at the destination airport
+    flight_numbers: str = ""
+    booking_url: str = ""  # pre-filled search on the program's own site
 
 
 @dataclass(frozen=True)
@@ -85,9 +91,78 @@ def parse_availability(row: dict) -> list[AwardResult]:
                 airlines=row.get(f"{prefix}Airlines") or "",
                 direct=bool(row.get(f"{prefix}Direct")),
                 updated_at=row.get("UpdatedAt") or "",
+                availability_id=row.get("ID") or "",
             )
         )
     return results
+
+
+_CABIN_BY_NAME = {
+    "economy": Cabin.ECONOMY,
+    "premium_economy": Cabin.PREMIUM_ECONOMY,
+    "premium": Cabin.PREMIUM_ECONOMY,
+    "business": Cabin.BUSINESS,
+    "first": Cabin.FIRST,
+}
+
+
+@dataclass(frozen=True)
+class FlightOption:
+    """One bookable flight (or connecting set of flights) behind a search result."""
+
+    cabin: Cabin
+    miles: int
+    seats: int
+    departs_at: datetime  # local time at the origin
+    arrives_at: datetime  # local time at the destination
+    flight_numbers: str
+    stops: int
+    total_duration: int  # minutes
+    total_taxes: int
+    currency: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class TripDetails:
+    options: tuple[FlightOption, ...]
+    booking_url: str  # the primary (program's own) pre-filled link, or ""
+    booking_links: tuple[tuple[str, str], ...]  # (label, url) for every program that can book it
+
+
+def _local_time(value: str) -> datetime:
+    """Seats.aero tags times 'Z' but they are local to each airport (LAX 22:55 -> YYZ 06:41
+    on a 4h46m flight). Fine for a connection at one airport, wrong for comparing across zones."""
+    return datetime.fromisoformat(value.removesuffix("Z"))
+
+
+def parse_trips(body: dict) -> TripDetails:
+    options = []
+    for entry in body.get("data", []):
+        cabin = _CABIN_BY_NAME.get(str(entry.get("Cabin", "")).lower())
+        if cabin is None or not entry.get("DepartsAt") or not entry.get("ArrivesAt"):
+            continue
+        miles = int(entry.get("MileageCost") or 0)
+        if miles <= 0:
+            continue
+        options.append(
+            FlightOption(
+                cabin=cabin,
+                miles=miles,
+                seats=int(entry.get("RemainingSeats") or 0),
+                departs_at=_local_time(entry["DepartsAt"]),
+                arrives_at=_local_time(entry["ArrivesAt"]),
+                flight_numbers=entry.get("FlightNumbers") or "",
+                stops=int(entry.get("Stops") or 0),
+                total_duration=int(entry.get("TotalDuration") or 0),
+                total_taxes=int(entry.get("TotalTaxes") or 0),
+                currency=entry.get("TaxesCurrency") or "",
+                updated_at=entry.get("UpdatedAt") or "",
+            )
+        )
+    links = [(l.get("label", ""), l["link"]) for l in body.get("booking_links") or [] if l.get("link")]
+    primary = next((l["link"] for l in body.get("booking_links") or [] if l.get("primary") and l.get("link")), "")
+    return TripDetails(options=tuple(options), booking_url=primary or (links[0][1] if links else ""), booking_links=tuple(links))
 
 
 class SeatsAeroClient:
@@ -131,6 +206,11 @@ class SeatsAeroClient:
         if status >= 400:
             raise SeatsAeroError(f"Seats.aero returned HTTP {status}: {response.text[:200]}", status)
         return response.json()
+
+    def trips(self, availability_id: str) -> TripDetails:
+        """Flight-level details (times, cost, seats, booking links) behind one search
+        result. Costs one API call."""
+        return parse_trips(self._get(f"trips/{availability_id}", {}))
 
     def search_page(
         self,

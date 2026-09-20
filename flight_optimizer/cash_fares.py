@@ -13,6 +13,7 @@ from datetime import date, datetime, timedelta, timezone
 import requests
 
 from flight_optimizer import db
+from flight_optimizer.connections import MIN_CONNECTION_MINUTES
 from flight_optimizer.seats_aero import Cabin
 
 SEARCH_URL = "https://serpapi.com/search.json"
@@ -222,11 +223,12 @@ def cheapest_reasonable(
     max_layover_minutes: int = DEFAULT_MAX_LAYOVER_MINUTES,
     max_total_minutes: int = DEFAULT_MAX_TOTAL_MINUTES,
 ) -> CashFare | None:
-    """The cash baseline: cheapest fare with no long layover and a sane total time."""
+    """The cash baseline: cheapest fare with a sane total time and every layover longer
+    than the minimum connection (1 hour) and no longer than `max_layover_minutes`."""
     reasonable = [
         f
         for f in fares
         if f.total_duration <= max_total_minutes
-        and all(layover <= max_layover_minutes for layover in f.layovers)
+        and all(MIN_CONNECTION_MINUTES < layover <= max_layover_minutes for layover in f.layovers)
     ]
     return min(reasonable, key=lambda f: (f.price, f.total_duration), default=None)

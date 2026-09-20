@@ -71,6 +71,14 @@ class TripOption:
         """Total connections across all directions that would be separate bookings."""
         return sum(i.self_transfers for i in self.itineraries)
 
+    @property
+    def connection_penalty(self) -> int:
+        """0 comfortable same-day, 1 tight, 2 overnight, summed over directions.
+        Unknown times count as 0 (they are flagged separately, never silently trusted)."""
+        return sum(
+            int(i.connection_class) for i in self.itineraries if i.connection_class is not None
+        )
+
 
 def assess(itineraries: Sequence[Itinerary], balances: dict[str, int]) -> Affordability:
     """Can `balances` pay for all of these itineraries together?"""
@@ -118,8 +126,9 @@ def _sort_key(option: TripOption) -> tuple:
     a = option.affordability
     if a.affordable:
         # Fewest self-transfers first: one ticket means bags are checked through and
-        # the airline covers a missed connection. Then cheapest.
-        return (0, option.self_transfers, option.total_miles, a.capital_one_used)
+        # the airline covers a missed connection. Then same-day connections with a
+        # comfortable buffer over tight ones over overnight stops. Then cheapest.
+        return (0, option.self_transfers, option.connection_penalty, option.total_miles, a.capital_one_used)
     return (1, a.total_shortfall, option.total_miles)
 
 

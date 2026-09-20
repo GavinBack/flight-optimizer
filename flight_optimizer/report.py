@@ -4,21 +4,18 @@ import sqlite3
 from datetime import date
 
 from flight_optimizer import db
-from flight_optimizer.affordability import (
-    CAPITAL_ONE_TRANSFERS,
-    SOURCE_TO_PROGRAM,
-    TripOption,
-    rank_trip,
-)
+from flight_optimizer.affordability import SOURCE_TO_PROGRAM, TripOption
+from flight_optimizer.analysis import analyze_trip
 from flight_optimizer.cash_fares import (
     DEFAULT_MAX_LAYOVER_MINUTES,
     DEFAULT_MAX_TOTAL_MINUTES,
     CashFare,
     SerpApiClient,
-    SerpApiError,
 )
-from flight_optimizer.itineraries import Itinerary, search_trip
-from flight_optimizer.savings import TripBaseline, estimate_value, trip_baseline
+from flight_optimizer.connections import COMFORTABLE_CONNECTION_MINUTES, MIN_CONNECTION_MINUTES, ConnectionClass
+from flight_optimizer.enrichment import EnrichmentStats
+from flight_optimizer.itineraries import Itinerary
+from flight_optimizer.savings import TripBaseline, estimate_value
 from flight_optimizer.seats_aero import AwardResult, SeatsAeroClient
 
 STALE_AWARD_DAYS = 7
@@ -40,12 +37,23 @@ def _fare_brief(fare: CashFare | None) -> str:
     return f"${fare.price:,} ({_hm(fare.total_duration)}, {_stops(fare.stops)}, {airlines})"
 
 
-def _itinerary_text(itinerary: Itinerary) -> str:
-    return "  +  ".join(
-        f"{leg.origin}>{leg.destination} {leg.date:%b %d} {leg.miles:>6,} "
-        f"{leg.source}{'' if leg.direct else '*'}"
-        for leg in itinerary.legs
+def _leg_text(leg: AwardResult) -> str:
+    when = f"{leg.date:%b %d}"
+    if leg.departs_at and leg.arrives_at:
+        next_day = "+1" if leg.arrives_at.date() > leg.departs_at.date() else ""
+        when += f" {leg.departs_at:%H:%M}-{leg.arrives_at:%H:%M}{next_day}"
+    flights = f" {leg.flight_numbers}" if leg.flight_numbers else ""
+    return (
+        f"{leg.origin}>{leg.destination} {when} {leg.miles:>6,} "
+        f"{leg.source}{'' if leg.direct else '*'}{flights}"
     )
+
+
+def _itinerary_text(itinerary: Itinerary) -> str:
+    text = "  +  ".join(_leg_text(leg) for leg in itinerary.legs)
+    if itinerary.connection_minutes is not None:
+        text += f"   [{_hm(itinerary.connection_minutes)} at {itinerary.via}]"
+    return text
 
 
 def _booking_text(itinerary: Itinerary) -> str:
@@ -119,13 +127,29 @@ def _warnings(option: TripOption, today: date) -> list[str]:
     if connecting:
         warnings.append("connecting flights (*), check the routing: " + ", ".join(connecting))
 
-    same_day = [
-        f"{it.via or it.legs[0].destination} on {it.legs[0].date:%b %d}"
-        for it in itineraries
-        if len(it.legs) == 2 and it.legs[0].date == it.legs[1].date
-    ]
-    if same_day:
-        warnings.append("same-day connection at " + ", ".join(same_day) + " (flight times not checked)")
+    unchecked, tight, overnight = [], [], []
+    for it in itineraries:
+        if len(it.legs) != 2:
+            continue
+        hub = it.via or it.legs[0].destination
+        connection = it.connection_class
+        if connection is None:
+            if it.legs[0].date == it.legs[1].date:
+                unchecked.append(f"{hub} on {it.legs[0].date:%b %d}")
+        elif connection is ConnectionClass.TIGHT:
+            tight.append(f"{hub} {_hm(it.connection_minutes)}")
+        elif connection is ConnectionClass.OVERNIGHT:
+            overnight.append(f"{hub} ({_hm(it.connection_minutes)})")
+    if unchecked:
+        warnings.append("same-day connection at " + ", ".join(unchecked) + " (flight times not checked)")
+    if tight:
+        warnings.append(
+            "tight connection at " + ", ".join(tight)
+            + f" (over {MIN_CONNECTION_MINUTES // 60} hour but under "
+            f"{COMFORTABLE_CONNECTION_MINUTES / 60:g} hours between flights)"
+        )
+    if overnight:
+        warnings.append("overnight stop at " + ", ".join(overnight) + ": you arrive later than a same-day connection")
 
     no_seats = [_leg_name(leg) for leg in legs if leg.remaining_seats == 0]
     if no_seats:
@@ -174,6 +198,56 @@ def _miss_text(option: TripOption) -> str:
     return "; ".join(parts)
 
 
+def _stats_line(stats: EnrichmentStats | None) -> str | None:
+    if stats is None or not (stats.lookups or stats.dropped_unsafe or stats.unverifiable):
+        return None
+    parts = [f"Flight times checked for the leading options ({stats.lookups} lookups)"]
+    if stats.dropped_unsafe:
+        parts.append(f"{stats.dropped_unsafe} dropped for a connection of {MIN_CONNECTION_MINUTES // 60} hour or less")
+    if stats.unverifiable:
+        parts.append(f"{stats.unverifiable} skipped for lack of usable flight details")
+    if stats.budget_reached:
+        parts.append("stopped early to protect the API quota")
+    return "; ".join(parts) + "."
+
+
+def _booking_count(option: TripOption) -> int:
+    return sum(len(it.legs) if it.self_transfers else 1 for it in option.itineraries)
+
+
+def _cash_ticket_lines(
+    baseline: TripBaseline | None, cabin: str, best_award: TripOption | None
+) -> list[str]:
+    """The protected alternative: a cash ticket is one booking each way."""
+    if baseline is None or baseline.cabin_total is None:
+        return []
+    directions = ["out", "ret"][: len(baseline.cabin_fares)]
+    fares = "   ".join(f"{d} {_fare_brief(f)}" for d, f in zip(directions, baseline.cabin_fares))
+    lines = [
+        "",
+        "CASH THROUGH-TICKET  (one booking each way: bags checked through, airline covers missed connections)",
+        f"  {cabin:<9}{fares}   TOTAL ${baseline.cabin_total:,}",
+    ]
+    short = [
+        f"{d} {_hm(m)}"
+        for d, fare in zip(directions, baseline.cabin_fares)
+        for m in fare.layovers
+        if m < COMFORTABLE_CONNECTION_MINUTES
+    ]
+    if short:
+        lines.append(
+            f"  check: layover under {COMFORTABLE_CONNECTION_MINUTES / 60:g} hours: " + ", ".join(short)
+        )
+    if baseline.economy_total is not None:
+        lines.append(f"  economy   TOTAL ${baseline.economy_total:,}")
+    if best_award is not None:
+        lines.append(
+            f"  vs award #1: {best_award.total_miles:,} miles on {_booking_count(best_award)} separate booking"
+            f"{'s' if _booking_count(best_award) != 1 else ''}"
+        )
+    return lines
+
+
 def render_trip(
     trip: sqlite3.Row,
     gateways: list[str],
@@ -182,6 +256,7 @@ def render_trip(
     balances: dict[str, int],
     *,
     cash_note: str | None = None,
+    stats: EnrichmentStats | None = None,
     top_n: int = 5,
     near_n: int = 3,
     today: date | None = None,
@@ -199,8 +274,8 @@ def render_trip(
 
     out.append("")
     out.append(
-        f"CASH BASELINE  (cheapest fare, layovers <= {DEFAULT_MAX_LAYOVER_MINUTES // 60}h, "
-        f"total <= {DEFAULT_MAX_TOTAL_MINUTES // 60}h)"
+        f"CASH BASELINE  (cheapest fare, layovers over {MIN_CONNECTION_MINUTES // 60}h and up to "
+        f"{DEFAULT_MAX_LAYOVER_MINUTES // 60}h, total <= {DEFAULT_MAX_TOTAL_MINUTES // 60}h)"
     )
     if baseline is None:
         out.append(f"  {cash_note or 'Cash prices unavailable.'}")
@@ -223,6 +298,9 @@ def render_trip(
     note = _preference_note(affordable)
     if note:
         out.append(f"  {note}")
+    stats_line = _stats_line(stats)
+    if stats_line:
+        out.append(f"  {stats_line}")
     if not ranked:
         out.append("  No award options found through the gateways.")
     elif not affordable:
@@ -245,6 +323,8 @@ def render_trip(
             out.append(("  check: " if index == 0 else "         ") + warning)
         if variants:
             out.append(f"  (+{variants} other date combination{'s' if variants > 1 else ''} at the same price)")
+
+    out.extend(_cash_ticket_lines(baseline, cabin, affordable[0] if affordable else None))
 
     if misses:
         out.append("")
@@ -273,21 +353,13 @@ def build_report(
     balances = db.get_balances(conn)
     sections = []
     for trip in trips:
-        gateways = db.get_gateways(conn, trip["id"])
-        ranked = rank_trip(search_trip(awards, trip, gateways), balances)
-
-        baseline, note = None, None
-        if cash is None:
-            note = "Cash prices skipped: SERPAPI_API_KEY is not set."
-        else:
-            try:
-                baseline = trip_baseline(conn, cash, trip)
-            except SerpApiError as exc:
-                note = f"Cash prices unavailable: {exc}"
-
+        analysis = analyze_trip(conn, awards, cash, trip, balances)
         sections.append(
-            render_trip(trip, gateways, ranked, baseline, balances,
-                        cash_note=note, top_n=top_n, near_n=near_n, today=today)
+            render_trip(
+                trip, analysis.gateways, analysis.ranked, analysis.baseline, balances,
+                cash_note=analysis.cash_note, stats=analysis.stats,
+                top_n=top_n, near_n=near_n, today=today,
+            )
         )
 
     usage = []
@@ -302,7 +374,8 @@ def build_report(
         "  One ticket = same program and same-day connection (assumed, so verify: a program may price the\n"
         "  combined trip differently from its legs). Cash baselines are single tickets, so mixed-program\n"
         "  awards are not a like-for-like comparison on protection.\n"
-        "  Seats.aero data is a cached snapshot and shows dates but not flight times. Verify on the\n"
+        "  Connections: same day with 2.5+ hours is preferred, under 2.5 hours warns, 1 hour or less is never\n"
+        "  recommended. Flight times are local and come from Seats.aero's cached snapshot. Verify on the\n"
         "  airline's site before transferring Capital One miles, because transfers cannot be undone.\n"
         + ("  " + " | ".join(usage) if usage else "")
     )

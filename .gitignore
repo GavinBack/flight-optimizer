@@ -48,3 +48,9 @@ build/
 # Temp / scratch
 tmp/
 *.tmp
+
+# Saved booking plans (contain balances and trip details)
+plans/
+
+# Local Claude Code settings (machine-specific permissions)
+.claude/

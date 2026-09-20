@@ -1,22 +1,157 @@
-"""Run the report: `python -m flight_optimizer [--top N]`."""
+"""Command line.
+
+    python -m flight_optimizer [report] [--top N]   report on every active trip
+    python -m flight_optimizer notify [--dry-run]   alert (via ntfy) on anything new
+    python -m flight_optimizer plan [TRIP] [--refresh]   show the booking plan
+    python -m flight_optimizer done TRIP            mark a trip booked (stops alerts)
+    python -m flight_optimizer test-notification    check that ntfy reaches your phone
+"""
 
 import argparse
 import sys
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 
 from flight_optimizer import db
+from flight_optimizer.alerts import assess_urgency, decide_alert, record_sent
+from flight_optimizer.analysis import analyze_trip
 from flight_optimizer.cash_fares import SerpApiClient
-from flight_optimizer.config import ConfigError, load_settings
+from flight_optimizer.config import ConfigError, Settings, load_settings
+from flight_optimizer.notify import NtfyClient, NtfyError
+from flight_optimizer.plans import latest_plan, render_plan, save_plan
 from flight_optimizer.report import build_report
 from flight_optimizer.seats_aero import SeatsAeroClient, SeatsAeroError
 
 
-def main(argv: list[str] | None = None, *, env_file: str | None = ".env") -> int:
+@dataclass
+class Clients:
+    awards: SeatsAeroClient
+    cash: SerpApiClient | None
+    ntfy: NtfyClient | None
+
+
+def default_clients(settings: Settings) -> Clients:
+    return Clients(
+        awards=SeatsAeroClient(settings.seats_aero_api_key),
+        cash=SerpApiClient(settings.serpapi_api_key) if settings.serpapi_api_key else None,
+        ntfy=NtfyClient(settings.ntfy_topic, server=settings.ntfy_server) if settings.ntfy_topic else None,
+    )
+
+
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m flight_optimizer",
-        description="Report the best affordable award options for each active trip.",
+        description="Find and alert on affordable award options for each active trip.",
     )
     parser.add_argument("--top", type=int, default=5, help="award options to show per trip (default 5)")
-    args = parser.parse_args(argv)
+    commands = parser.add_subparsers(dest="command")
+
+    report = commands.add_parser("report", help="print the report (the default)")
+    report.add_argument("--top", type=int, default=argparse.SUPPRESS)
+
+    notify = commands.add_parser("notify", help="send an ntfy alert for anything new")
+    notify.add_argument("--dry-run", action="store_true", help="print what would be sent; send and save nothing")
+
+    plan = commands.add_parser("plan", help="show the saved booking plan for a trip")
+    plan.add_argument("trip_id", nargs="?", type=int)
+    plan.add_argument("--refresh", action="store_true", help="search again and rebuild the plan first")
+
+    done = commands.add_parser("done", help="mark a trip booked, so it stops being searched and alerted on")
+    done.add_argument("trip_id", type=int)
+
+    commands.add_parser("test-notification", help="send a test message to your ntfy topic")
+    return parser
+
+
+def _pick_trip(conn, trip_id: int | None):
+    if trip_id is not None:
+        trip = conn.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
+        if trip is None:
+            raise LookupError(f"No trip with id {trip_id}")
+        return trip
+    active = db.active_trips(conn)
+    if len(active) == 1:
+        return active[0]
+    names = ", ".join(f"{t['id']} ({t['name']})" for t in active) or "none active"
+    raise LookupError(f"Say which trip: {names}")
+
+
+def _run_notify(conn, clients: Clients, plans_dir: Path, *, dry_run: bool, now: datetime) -> int:
+    trips = db.active_trips(conn)
+    if not trips:
+        print("No active trips. Mark a trip active to be alerted about it.")
+        return 0
+    if not dry_run and clients.ntfy is None:
+        print("error: NTFY_TOPIC is not set. Add it to .env (see .env.example).", file=sys.stderr)
+        return 1
+
+    balances = db.get_balances(conn)
+    failed = False
+    for trip in trips:
+        analysis = analyze_trip(conn, clients.awards, clients.cash, trip, balances)
+        alert = decide_alert(conn, analysis, now=now)
+        if alert is None:
+            print(f"{trip['name']}: nothing new to alert on.")
+            continue
+        if dry_run:
+            print(f"--- would send for {trip['name']} (priority {alert.priority}) ---")
+            print(alert.title)
+            print(alert.message)
+            continue
+
+        # Save the plan first, so the alert's "full steps" pointer is always valid.
+        plan_text = render_plan(analysis, alert.option, balances=balances, generated_at=now, urgency=alert.urgency)
+        path = save_plan(plan_text, trip, generated_at=now, directory=plans_dir)
+        try:
+            clients.ntfy.send(
+                alert.message, title=alert.title, priority=alert.priority, tags=alert.tags, click=alert.click
+            )
+        except NtfyError as exc:
+            print(f"{trip['name']}: could not send the alert: {exc}", file=sys.stderr)
+            failed = True  # not recorded, so the next run tries again
+            continue
+        record_sent(conn, alert, str(path))
+        print(f"{trip['name']}: alert sent ({alert.urgency.label}). Plan saved to {path}")
+    return 1 if failed else 0
+
+
+def _run_plan(conn, clients: Clients, plans_dir: Path, args, now: datetime) -> int:
+    trip = _pick_trip(conn, args.trip_id)
+    if args.refresh:
+        balances = db.get_balances(conn)
+        analysis = analyze_trip(conn, clients.awards, clients.cash, trip, balances)
+        if not analysis.affordable:
+            print(f"{trip['name']}: no affordable option right now, so there is no plan to build.")
+            return 0
+        best = analysis.affordable[0]
+        text = render_plan(analysis, best, balances=balances, generated_at=now, urgency=assess_urgency(best))
+        path = save_plan(text, trip, generated_at=now, directory=plans_dir)
+        print(f"Plan saved to {path}\n")
+        print(text)
+        return 0
+
+    path = latest_plan(trip["id"], plans_dir)
+    if path is None:
+        print(
+            f"No saved plan for {trip['name']}. Plans are saved when an alert is sent, or run:\n"
+            f"  python -m flight_optimizer plan {trip['id']} --refresh"
+        )
+        return 1
+    print(f"Plan file: {path}\n")
+    print(path.read_text())
+    return 0
+
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    env_file: str | None = ".env",
+    clients_factory=default_clients,
+    plans_dir: Path | None = None,
+    now: datetime | None = None,
+) -> int:
+    args = _build_parser().parse_args(argv)
 
     try:
         settings = load_settings(env_file)
@@ -26,15 +161,35 @@ def main(argv: list[str] | None = None, *, env_file: str | None = ".env") -> int
 
     conn = db.connect(settings.database_path)
     db.init_schema(conn)
-    awards = SeatsAeroClient(settings.seats_aero_api_key)
-    cash = SerpApiClient(settings.serpapi_api_key) if settings.serpapi_api_key else None
+    plans_dir = plans_dir or settings.database_path.resolve().parent / "plans"
+    now = now or datetime.now()
+    clients = clients_factory(settings)
 
     try:
-        print(build_report(conn, awards, cash, top_n=args.top))
-    except SeatsAeroError as exc:
+        if args.command == "done":
+            trip = _pick_trip(conn, args.trip_id)
+            db.set_trip_active(conn, trip["id"], False)
+            print(f"{trip['name']} marked inactive: it will no longer be searched or alerted on.")
+            return 0
+        if args.command == "test-notification":
+            if clients.ntfy is None:
+                print("error: NTFY_TOPIC is not set. Add it to .env (see .env.example).", file=sys.stderr)
+                return 1
+            clients.ntfy.send(
+                "If you can read this, notifications from Flight Optimizer are working.",
+                title="Flight Optimizer test", tags=("white_check_mark",),
+            )
+            print("Test notification sent. Check your phone.")
+            return 0
+        if args.command == "notify":
+            return _run_notify(conn, clients, plans_dir, dry_run=args.dry_run, now=now)
+        if args.command == "plan":
+            return _run_plan(conn, clients, plans_dir, args, now)
+        print(build_report(conn, clients.awards, clients.cash, top_n=args.top))
+        return 0
+    except (SeatsAeroError, NtfyError, LookupError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    return 0
 
 
 if __name__ == "__main__":

@@ -1,0 +1,182 @@
+"""The full booking plan for an option: the steps to read at a laptop after an alert.
+
+Plans are saved under `plans/` (git-ignored: they contain balances and trip details).
+"""
+
+import re
+import sqlite3
+from datetime import date, datetime
+from pathlib import Path
+
+from flight_optimizer.affordability import CAPITAL_ONE_TRANSFERS, SOURCE_TO_PROGRAM, TripOption
+from flight_optimizer.alerts import Urgency, assess_urgency, heads_up, oldest_data, option_key, option_legs
+from flight_optimizer.analysis import TripAnalysis
+from flight_optimizer.savings import estimate_value
+
+DEFAULT_DIRECTORY = Path("plans")
+
+
+def _hm(minutes: int) -> str:
+    return f"{minutes // 60}h{minutes % 60:02d}m"
+
+
+def _leg_line(leg) -> str:
+    times = ""
+    if leg.departs_at and leg.arrives_at:
+        next_day = "+1" if leg.arrives_at.date() > leg.departs_at.date() else ""
+        times = f" {leg.departs_at:%H:%M}-{leg.arrives_at:%H:%M}{next_day} (local)"
+    flights = f"  flights {leg.flight_numbers}" if leg.flight_numbers else ""
+    return f"{leg.origin}>{leg.destination}  {leg.date:%a %b %d}{times}{flights}"
+
+
+def _taxes_line(leg) -> str:
+    if not leg.total_taxes:
+        return "taxes/fees: none reported"
+    return (
+        f"taxes/fees: about {leg.total_taxes / 100:,.2f} {leg.currency} "
+        f"(Seats.aero reports {leg.total_taxes}; assumed hundredths, so confirm on the booking page)"
+    )
+
+
+def render_plan(
+    analysis: TripAnalysis,
+    option: TripOption,
+    *,
+    balances: dict[str, int],
+    generated_at: datetime,
+    urgency: Urgency | None = None,
+) -> str:
+    trip = analysis.trip
+    urgency = urgency or assess_urgency(option)
+    cabin = trip["cabin"].replace("_", " ")
+    depart = date.fromisoformat(trip["depart_date"])
+    dates = f"{depart:%b %d %Y}"
+    if trip["return_date"]:
+        dates += f" - {date.fromisoformat(trip['return_date']):%b %d %Y}"
+
+    out = [
+        f"BOOKING PLAN   {trip['name']}   {trip['origin']} > {trip['destination']}   {dates}   ({cabin})",
+        f"Generated {generated_at:%Y-%m-%d %H:%M}. "
+        + (f"Award data as of {oldest_data(option)} (oldest leg). " if oldest_data(option) else "")
+        + "Everything below is a snapshot: confirm each flight is still bookable.",
+        f"Urgency: {urgency.label}. {urgency.reason}. (Seat counts are a guide, not a guarantee.)",
+        "",
+    ]
+
+    headline = f"THE OPTION: {option.total_miles:,} miles"
+    if analysis.baseline is not None:
+        value = estimate_value(option, analysis.baseline)
+        if value.cents_per_mile_vs_cabin is not None:
+            headline += (
+                f", {value.cents_per_mile_vs_cabin:.2f} c/mile vs {cabin} cash ${value.cabin_cash:,}"
+            )
+        if value.cents_per_mile_vs_economy is not None:
+            headline += f" ({value.cents_per_mile_vs_economy:.2f} vs economy cash ${value.economy_cash:,})"
+    out.append(headline)
+    bookings = sum(len(it.legs) if it.self_transfers else 1 for it in option.itineraries)
+    out.append(f"  {bookings} booking{'s' if bookings != 1 else ''}.")
+    for note in heads_up(option):
+        out.append(f"  - {note}")
+
+    legs = option_legs(option)
+    out += ["", "STEP 1. VERIFY every flight on the program's own site BEFORE moving any miles"]
+    labels = iter("abcdefgh")
+    for direction, itinerary in zip(("OUT ", "BACK"), option.itineraries):
+        for leg in itinerary.legs:
+            out.append(f"  1{next(labels)}. {direction} {_leg_line(leg)}")
+            out.append(
+                f"      {leg.source}: {leg.miles:,} miles; {leg.remaining_seats} seat"
+                f"{'s' if leg.remaining_seats != 1 else ''}; {_taxes_line(leg)}"
+            )
+            if leg.updated_at:
+                out.append(f"      data last refreshed {leg.updated_at[:10]}")
+            if leg.booking_url:
+                out.append(f"      open: {leg.booking_url}")
+        if itinerary.connection_minutes is not None:
+            out.append(f"      connection at {itinerary.via}: {_hm(itinerary.connection_minutes)}")
+    out.append("  The links pre-fill route and date, not always the cabin (some open in economy): set the cabin yourself.")
+    out.append("  Check that the price and the exact flights match, and note the change/cancellation terms.")
+
+    transfers = option.affordability.transfers
+    out += ["", "STEP 2. TRANSFER from Capital One (this cannot be undone)"]
+    if transfers:
+        for program, miles in sorted(transfers.items()):
+            ratio = CAPITAL_ONE_TRANSFERS.get(program)
+            out.append(f"  Move {miles:,} Capital One miles to {program} (ratio {ratio} to 1).")
+        left = balances.get("capital_one", 0) - option.affordability.capital_one_used
+        out.append(f"  Capital One miles left afterwards: {left:,}.")
+        out.append("  Only do this once every flight in step 1 is confirmed. Transfers are reported as 1:1 and")
+        out.append("  usually instant; confirm the current terms in your Capital One account.")
+    else:
+        out.append("  No transfer needed: every leg is paid from the program's own balance.")
+
+    out += ["", "STEP 3. BOOK, scarcest leg first (it is the likeliest to disappear)"]
+    for number, leg in enumerate(
+        sorted(legs, key=lambda leg: (leg.remaining_seats, leg.updated_at or "")), start=1
+    ):
+        program = SOURCE_TO_PROGRAM.get(leg.source, leg.source)
+        out.append(
+            f"  {number}. {leg.origin}>{leg.destination} {leg.date:%b %d} with {program}: "
+            f"{leg.miles:,} miles ({leg.remaining_seats} seat{'s' if leg.remaining_seats != 1 else ''} left)"
+        )
+
+    out += [
+        "",
+        "STEP 4. AFTER BOOKING",
+        f"  Run: python -m flight_optimizer done {trip['id']}   (marks the trip inactive so alerts stop)",
+    ]
+
+    others = []
+    seen = {option_key(option)}
+    for other in analysis.affordable:
+        key = option_key(other)
+        if key not in seen:
+            seen.add(key)
+            others.append(other)
+        if len(others) == 2:
+            break
+    out += ["", "IF THIS OPTION DISAPPEARS"]
+    if others:
+        for other in others:
+            out.append(f"  {other.total_miles:,} miles ({other.total_miles - option.total_miles:+,})")
+            for label, itinerary in zip(("out ", "back"), other.itineraries):
+                out.append("    " + label + "  " + "  +  ".join(_leg_line(l) + f" {l.miles:,} {l.source}" for l in itinerary.legs))
+    else:
+        out.append("  No other affordable option right now.")
+
+    baseline = analysis.baseline
+    if baseline is not None and baseline.cabin_total is not None:
+        out += [
+            "",
+            "CASH ALTERNATIVE  (one booking each way: bags checked through, airline covers missed connections)",
+            f"  {cabin}: ${baseline.cabin_total:,} round trip"
+            + (f"   economy: ${baseline.economy_total:,}" if baseline.economy_total is not None else ""),
+        ]
+
+    out += [
+        "",
+        "NOTES",
+        "  Award figures are before taxes and fees. Legs reporting 0 seats are excluded. A connection of",
+        "  1 hour or less is never recommended; under 2.5 hours is flagged. Separate bookings mean bags are",
+        "  re-checked and the airline is not responsible for a missed connection between them.",
+    ]
+    return "\n".join(out)
+
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-") or "trip"
+
+
+def save_plan(text: str, trip: sqlite3.Row, *, generated_at: datetime, directory: Path = DEFAULT_DIRECTORY) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{trip['id']}-{_slug(trip['name'])}-{generated_at:%Y%m%d-%H%M}.txt"
+    path.write_text(text + "\n")
+    return path
+
+
+def latest_plan(trip_id: int, directory: Path = DEFAULT_DIRECTORY) -> Path | None:
+    """The most recently saved plan for a trip, or None."""
+    if not directory.exists():
+        return None
+    matches = sorted(directory.glob(f"{trip_id}-*.txt"))
+    return matches[-1] if matches else None

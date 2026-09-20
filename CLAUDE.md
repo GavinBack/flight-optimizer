@@ -23,13 +23,19 @@ pip install -r requirements.txt
 pytest                                    # all tests; none touch the network or spend API calls
 pytest tests/test_db.py::test_name        # a single test
 python -m flight_optimizer [--top N]    # live report for active trips; ~18 Seats.aero calls, cash prices come from the cache
+python -m flight_optimizer notify [--dry-run]   # ntfy alert for anything new (dry run prints it, sends and saves nothing)
+python -m flight_optimizer plan [TRIP] [--refresh]   # show the saved booking plan (--refresh re-searches: ~60 API calls)
+python -m flight_optimizer done TRIP    # mark a trip booked: inactive, so no more searching or alerts
+python -m flight_optimizer test-notification   # check ntfy reaches the phone
+
+Scheduled: launchd job `com.gavinback.flightoptimizer.notify` runs `notify` daily at 7:00 AM (log: `logs/notify.log`). Stop it with `launchctl bootout gui/$(id -u)/com.gavinback.flightoptimizer.notify`; start it again with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.gavinback.flightoptimizer.notify.plist`. The plist holds absolute paths to this checkout and `.venv`, so re-create it if either moves.
 ```
 
 No linter, formatter, or entry-point script has been chosen yet. Don't invent one. Add it to this file when it's introduced.
 
 ## Code layout
 
-`flight_optimizer/`: `config.py` (env/.env settings), `db.py` (schema and helpers), `seats_aero.py` (API client), `itineraries.py` (gateway search: direct pair plus origin->hub and hub->destination, combined into itineraries), `affordability.py` (ranks trips by what balances can pay for), `cash_fares.py` (SerpApi client, cache, baseline rule), `savings.py` (cents per mile vs cash baseline), `report.py` (plain-text report), `__main__.py` (CLI). Tests in `tests/`.
+`flight_optimizer/`: `config.py` (env/.env settings), `db.py` (schema and helpers), `seats_aero.py` (API client), `itineraries.py` (gateway search: direct pair plus origin->hub and hub->destination, combined into itineraries), `affordability.py` (ranks trips by what balances can pay for), `cash_fares.py` (SerpApi client, cache, baseline rule), `savings.py` (cents per mile vs cash baseline), `connections.py` (connection-time rules), `enrichment.py` (flight-level lookups for the leading candidates), `analysis.py` (search + verify + rank + value, shared by report and alerts), `report.py` (plain-text report), `notify.py` (ntfy client), `alerts.py` (what to alert on, urgency, de-duplication), `plans.py` (booking plans saved to `plans/`), `__main__.py` (CLI). Tests in `tests/` (shared builders in `tests/builders.py`).
 
 Seats.aero specifics that aren't obvious from the code:
 
@@ -37,10 +43,13 @@ Seats.aero specifics that aren't obvious from the code:
 - Pagination is `skip` (rows already fetched, not results) plus the **first** page's `cursor`. Each page is one of the 1,000 daily calls, and `search()` raises rather than truncating at `max_pages`.
 - Data is a cached snapshot. Check `updated_at`, since rows can be months stale. Live Search is not available on Pro.
 - `remaining_seats` can be 0 while a cabin is flagged available. By the owner's decision, legs with 0 seats are treated as unbookable and dropped in `itineraries.search_one_way` (`MIN_SEATS`). Caveat: some programs report 0 on most results (Azul, Aeromexico, American ~78%), so this may over-exclude.
-- Seats.aero only knows airport pairs that programs publish; it does not stitch itineraries. A pair with no route returns an empty result for every date (e.g. RNO->SJO), so search via gateway hubs (RNO->LAX, LAX->SJO); `itineraries.search_active_trips` does this using each trip's `trip_gateways`. Seats.aero returns dates but no flight times, so paired legs are not verified to connect. Use the `/routes?source=<id>` endpoint to check whether a pair exists.
+- Seats.aero only knows airport pairs that programs publish; it does not stitch itineraries. A pair with no route returns an empty result for every date (e.g. RNO->SJO), so search via gateway hubs (RNO->LAX, LAX->SJO); `itineraries.search_active_trips` does this using each trip's `trip_gateways`. Search results have dates but no flight times: `enrichment.py` calls the `trips/{id}` endpoint (one call per result row) for the leading candidates to get real times, per-flight prices and seats, and booking links. Use the `/routes?source=<id>` endpoint to check whether a pair exists.
 - Program `source` ids: united, american, delta, alaska (Atmos), qantas, lifemiles, flyingblue, british (Avios). Southwest returns no routes.
 - `db.active_trips()` is the single gate for the `active` rule below. Route every trip-driven job through it.
 - Ranking prefers fewer self-transfers over lower miles (`Itinerary.self_transfers`): one ticket is a heuristic (same program and same-day connection), because separate tickets mean bags are re-checked and the airline doesn't cover a missed connection. It's the owner's stated preference, so don't rank by price alone.
+- `trips` data: times are labeled `Z` but are local to each airport (fine for a hub connection, wrong across time zones). Each flight has its own price, which can exceed the cheapest row price, so enrichment re-prices the itinerary from the flights it actually picks. `TotalTaxes` looks like hundredths of the currency. `booking_links` are pre-filled searches on each program's site but may not set the cabin.
+- Connection rules (owner's decision, `connections.py`): same day with 2.5h+ preferred; over 1h and under 2.5h warns; 1h or less is never recommended (also applied to cash fares); overnight ranks below any same-day connection. Ranking is `(affordable, self-transfers, connection class, miles)`.
+- Alerts: `notify` alerts only on the best affordable option, once per exact set of flights per 7 days unless it got cheaper. The alert is a short summary with an urgency line (seat-count based, a guide not a prediction) and never includes balances. The detailed steps live in a saved plan for the laptop. `NTFY_TOPIC` acts as a password on the public server: never print or commit it.
 - Affordability: each program's own balance is used first, then the shared Capital One balance covers shortfalls only for partners listed in `CAPITAL_ONE_TRANSFERS` (verified 1:1 only; an unlisted program must be paid from its own balance). Round trips are assessed jointly so both directions share balances.
 - Cash fares: SerpApi's free plan is 250 searches a month, so always go through `cash_fares.get_fares` (cached in `cash_fare_cache`, 7-day freshness) and never call `SerpApiClient.search` directly in loops. `requests` exception text includes the full URL with the `api_key`, so the client re-raises without it. Never print or log raw `requests` errors from that client.
 - The cash baseline is the cheapest through fare with layovers <= 4h and total <= 15h; the limits swing the result heavily. Savings figures exclude award taxes and fees.

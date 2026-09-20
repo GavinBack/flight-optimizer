@@ -17,6 +17,9 @@ class Settings:
     database_path: Path
     # Optional so award-only features work before a SerpApi account exists.
     serpapi_api_key: str | None = None
+    # ntfy alerts. The topic acts as a password on the public server, so keep it secret.
+    ntfy_topic: str | None = None
+    ntfy_server: str = "https://ntfy.sh"
 
 
 def load_settings(env_file: Path | str | None = ".env") -> Settings:
@@ -37,4 +40,6 @@ def load_settings(env_file: Path | str | None = ".env") -> Settings:
         seats_aero_api_key=api_key,
         database_path=Path(os.environ.get("DATABASE_PATH", "flight_optimizer.db")),
         serpapi_api_key=os.environ.get("SERPAPI_API_KEY", "").strip() or None,
+        ntfy_topic=os.environ.get("NTFY_TOPIC", "").strip() or None,
+        ntfy_server=os.environ.get("NTFY_SERVER", "").strip().rstrip("/") or "https://ntfy.sh",
     )

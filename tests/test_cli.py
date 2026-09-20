@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -9,11 +9,14 @@ from flight_optimizer.notify import NtfyError
 from flight_optimizer.seats_aero import AwardResult, Cabin, FlightOption, TripDetails
 
 
+RECENT = (date.today() - timedelta(days=1)).isoformat() + "T00:00:00Z"
+
+
 def award(origin, dest, source, miles, on, aid):
     return AwardResult(
         source=source, origin=origin, destination=dest, date=on, cabin=Cabin.BUSINESS, miles=miles,
         total_taxes=0, currency="USD", remaining_seats=2, airlines="XX", direct=True,
-        updated_at="2026-09-19T00:00:00Z", availability_id=aid,
+        updated_at=RECENT, availability_id=aid,
     )
 
 
@@ -25,12 +28,12 @@ TABLE = {
 }
 
 
-def details(miles, day, dep_hour, arr_hour, seats=2):
+def details(miles, day, dep_hour, arr_hour, seats=2, updated=RECENT):
     at = lambda h: datetime(day.year, day.month, day.day, h)
     option = FlightOption(
         cabin=Cabin.BUSINESS, miles=miles, seats=seats, departs_at=at(dep_hour), arrives_at=at(arr_hour),
         flight_numbers="XX100", stops=0, total_duration=180, total_taxes=0, currency="USD",
-        updated_at="2026-09-19T00:00:00Z",
+        updated_at=updated,
     )
     return TripDetails(options=(option,), booking_url="https://book.example/x", booking_links=())
 
@@ -44,15 +47,17 @@ DETAILS = {  # each direction lands at LAX at 10:00 and leaves at 14:00: a comfo
 class FakeAwards:
     calls_remaining = 900
 
-    def __init__(self):
+    def __init__(self, table=None, detail_table=None):
         self.searched = []
+        self.table = table or TABLE
+        self.detail_table = detail_table or DETAILS
 
     def search(self, origin, destination, start, end, **_):
         self.searched.append((origin, destination))
-        return [r for r in TABLE.get((origin, destination), []) if start <= r.date <= end]
+        return [r for r in self.table.get((origin, destination), []) if start <= r.date <= end]
 
     def trips(self, availability_id, version=None):
-        return DETAILS[availability_id]
+        return self.detail_table[availability_id]
 
 
 class FakeNtfy:
@@ -516,3 +521,46 @@ def test_gateways_options_are_mutually_exclusive(env):
         run(["gateways", "--add", "DEN", "--remove", "LAX"], tmp_path)
 
     assert excinfo.value.code == 2
+
+
+# --- freshness -------------------------------------------------------------------------------
+
+OLD = "2020-01-01T00:00:00Z"
+
+
+def stale_awards():
+    from dataclasses import replace
+    table = {pair: [replace(r, updated_at=OLD) for r in rows] for pair, rows in TABLE.items()}
+    stale_details = {
+        "RL": details(10_900, JAN9, 7, 10, updated=OLD), "LS": details(25_000, JAN9, 14, 20, updated=OLD),
+        "SL": details(25_000, JAN16, 6, 10, updated=OLD), "LR": details(10_900, JAN16, 14, 16, updated=OLD),
+    }
+    return FakeAwards(table, stale_details)
+
+
+def test_notify_stays_silent_and_says_why_when_every_option_rests_on_stale_data(env, capsys):
+    conn, tmp_path = env
+
+    code, _, ntfy = run(["notify"], tmp_path, awards=stale_awards())
+
+    out = capsys.readouterr().out
+    assert code == 0 and ntfy.sent == [] and alert_rows(conn) == []
+    assert "every one relies on award data older than 7 days, so no alert was sent" in out
+    assert "nothing new to alert on" not in out
+
+
+def test_the_stale_options_are_still_visible_in_the_report(env, capsys):
+    _, tmp_path = env
+
+    run(["report"], tmp_path, awards=stale_awards())
+
+    out = capsys.readouterr().out
+    assert "DATA STALE, oldest" in out and "BEST AFFORDABLE OPTIONS" in out
+
+
+def test_current_data_still_alerts_normally(env):
+    _, tmp_path = env
+
+    _, _, ntfy = run(["notify"], tmp_path)
+
+    assert len(ntfy.sent) == 1

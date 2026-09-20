@@ -2,7 +2,7 @@ from datetime import datetime
 
 import pytest
 
-from builders import JAN9, JAN16, add_trip, analysis_for, baseline, good_option, leg, option
+from builders import JAN9, JAN16, RECENT, add_trip, analysis_for, baseline, good_option, leg, option
 from flight_optimizer import db
 from flight_optimizer.plans import latest_plan, render_plan, save_plan
 
@@ -41,7 +41,7 @@ def test_every_leg_is_listed_with_times_flights_seats_link_and_data_age(conn):
     assert "OUT  RNO>LAX  Sat Jan 09 07:00-10:00 (local)  flights UA1" in text
     assert "delta: 10,900 miles; 2 seats" in text
     assert "open: https://book.example/lax-sjo" in text
-    assert "data last refreshed 2026-09-19" in text
+    assert f"data last refreshed {RECENT[:10]}" in text
     assert "connection at LAX: 4h00m" in text
 
 
@@ -165,3 +165,90 @@ def test_latest_plan_does_not_confuse_trip_1_with_trip_10(tmp_path):
 
     assert latest_plan(1, directory) is None
     assert latest_plan(10, directory).read_text() == "ten"
+
+
+def qantas_option():
+    return option(
+        [leg("RNO", "LAX", "qantas", 29_000, JAN9, seats=2), leg("LAX", "SJO", "aeroplan", 25_000, JAN9, seats=5)],
+        [leg("SJO", "LAX", "aeroplan", 25_000, JAN16, seats=5), leg("LAX", "RNO", "delta", 10_900, JAN16, seats=5)],
+    )
+
+
+def test_each_transfer_states_the_ratio_points_received_and_how_long_it_takes(conn):
+    _, text = plan_for(conn, [qantas_option()])
+
+    assert "Move 29,000 Capital One miles to qantas (1:1: you receive 29,000 points). Takes: up to 36 hours." in text
+    assert "Move 50,000 Capital One miles to aeroplan (1:1: you receive 50,000 points). Takes: almost instant." in text
+
+
+def test_a_slow_transfer_gets_an_explicit_warning_that_seats_may_not_last(conn):
+    _, text = plan_for(conn, [qantas_option()])
+
+    assert "WARNING: the qantas transfer takes up to 36 hours" in text and "seats may not last" in text
+    assert "WARNING: the aeroplan" not in text  # instant ones don't warn
+
+
+def test_no_slow_transfer_warning_when_every_transfer_is_near_instant(conn):
+    _, text = plan_for(conn)
+
+    assert "WARNING" not in text
+
+
+def test_the_plan_no_longer_claims_transfers_are_usually_instant(conn):
+    _, text = plan_for(conn, [qantas_option()])
+
+    assert "usually instant" not in text
+
+
+def virgin_option():
+    return option(
+        [leg("RNO", "LAX", "virginatlantic", 21_000, JAN9), leg("LAX", "SJO", "aeroplan", 25_000, JAN9)],
+        [leg("SJO", "LAX", "aeroplan", 25_000, JAN16), leg("LAX", "RNO", "delta", 10_900, JAN16)],
+    )
+
+
+def test_the_virgin_transfer_step_carries_the_account_guidance(conn):
+    _, text = plan_for(conn, [virgin_option()])
+
+    assert "to virginatlantic (1:1: you receive 21,000 points). Takes: about 1 business day." in text
+    assert "sends this to your Virgin Red membership number" in text
+    assert "free Flying Club account" in text and "Link accounts > Link Virgin Atlantic" in text
+
+
+def test_only_virgin_gets_that_note(conn):
+    _, text = plan_for(conn)
+
+    assert "Virgin Red" not in text
+
+
+def test_the_plan_lists_the_accounts_needed_and_how_each_is_funded(conn):
+    _, text = plan_for(conn, [virgin_option()])
+
+    section = text[text.index("BEFORE YOU START"):text.index("STEP 1.")]
+    assert "Virgin Atlantic Flying Club (receives a Capital One transfer) plus a linked Virgin Red account" in section
+    assert "Air Canada Aeroplan (receives a Capital One transfer)" in section
+    assert "Delta SkyMiles (paid from your own balance)" in section
+
+
+def test_each_program_is_listed_once_even_when_it_has_two_legs(conn):
+    _, text = plan_for(conn)
+
+    section = text[text.index("BEFORE YOU START"):text.index("STEP 1.")]
+    assert section.count("Delta SkyMiles") == 1 and section.count("Air Canada Aeroplan") == 1
+
+
+def test_accounts_come_before_the_verify_step(conn):
+    _, text = plan_for(conn)
+
+    assert text.index("BEFORE YOU START") < text.index("STEP 1. VERIFY")
+
+
+def test_the_plan_header_states_data_freshness_relative_to_when_it_was_generated(conn):
+    fresh = good_option(seats=2, updated="2026-09-19T00:00:00Z")
+    old = good_option(seats=2, updated="2026-08-01T00:00:00Z")
+
+    _, current = plan_for(conn, [fresh])
+    _, stale = plan_for(add_conn(), [old])
+
+    assert "Data freshness: data current, oldest 1d." in current.split("\n\n")[0]
+    assert "Data freshness: DATA STALE, oldest 50d." in stale.split("\n\n")[0]

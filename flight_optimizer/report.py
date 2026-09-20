@@ -4,9 +4,10 @@ import sqlite3
 from datetime import date
 
 from flight_optimizer import db
-from flight_optimizer.affordability import SOURCE_TO_PROGRAM, TripOption
+from flight_optimizer.affordability import SOURCE_TO_PROGRAM, TripOption, slow_transfers
 from flight_optimizer.analysis import analyze_trip
 from flight_optimizer.cash_fares import (
+    DEFAULT_MAX_CACHE_AGE,
     DEFAULT_MAX_LAYOVER_MINUTES,
     DEFAULT_MAX_TOTAL_MINUTES,
     CashFare,
@@ -14,11 +15,12 @@ from flight_optimizer.cash_fares import (
 )
 from flight_optimizer.connections import COMFORTABLE_CONNECTION_MINUTES, MIN_CONNECTION_MINUTES, ConnectionClass
 from flight_optimizer.enrichment import EnrichmentStats
-from flight_optimizer.itineraries import Itinerary
+from flight_optimizer.itineraries import (
+    CURRENT_AWARD_DAYS, STALE_AWARD_DAYS, Freshness, Itinerary, is_stale,
+)
 from flight_optimizer.savings import TripBaseline, estimate_value
 from flight_optimizer.seats_aero import AwardResult, SeatsAeroClient
 
-STALE_AWARD_DAYS = 7
 RULE = "=" * 78
 
 
@@ -54,6 +56,17 @@ def _itinerary_text(itinerary: Itinerary) -> str:
     if itinerary.connection_minutes is not None:
         text += f"   [{_hm(itinerary.connection_minutes)} at {itinerary.via}]"
     return text
+
+
+def freshness_label(option: TripOption, today: date) -> str:
+    """How current an option's data is, by its stalest leg."""
+    age = option.oldest_age_days(today)
+    oldest = f"oldest {age}d" if age is not None else "age unknown"
+    return {
+        Freshness.CURRENT: f"data current, {oldest}",
+        Freshness.AGING: f"data aging, {oldest}",
+        Freshness.STALE: f"DATA STALE, {oldest}",
+    }[option.freshness(today)]
 
 
 def _booking_text(itinerary: Itinerary) -> str:
@@ -123,7 +136,11 @@ def _warnings(option: TripOption, today: date) -> list[str]:
     legs = [leg for it in itineraries for leg in it.legs]
     warnings = []
 
-    connecting = [_leg_name(leg) for leg in legs if not leg.direct]
+    connecting = [
+        _leg_name(leg) + (f" ({leg.stops} stop{'s' if leg.stops != 1 else ''})" if leg.stops else "")
+        for leg in legs
+        if not leg.direct
+    ]
     if connecting:
         warnings.append("connecting flights (*), check the routing: " + ", ".join(connecting))
 
@@ -155,11 +172,7 @@ def _warnings(option: TripOption, today: date) -> list[str]:
     if no_seats:
         warnings.append("0 seats reported: " + ", ".join(no_seats))
 
-    stale = [
-        f"{_leg_name(leg)} ({leg.updated_at[:10]})"
-        for leg in legs
-        if leg.updated_at and (today - date.fromisoformat(leg.updated_at[:10])).days > STALE_AWARD_DAYS
-    ]
+    stale = [f"{_leg_name(leg)} ({leg.updated_at[:10]})" for leg in legs if is_stale(leg, today)]
     if stale:
         warnings.append(f"data older than {STALE_AWARD_DAYS} days, last refreshed: " + ", ".join(stale))
     return warnings
@@ -185,6 +198,8 @@ def _payment_lines(option: TripOption, balances: dict[str, int]) -> list[str]:
         moved = ", ".join(f"{c1:,} -> {p}" for p, c1 in sorted(transfers.items()))
         left = balances.get("capital_one", 0) - option.affordability.capital_one_used
         lines.append(f"       transfer from Capital One: {moved} ({left:,} left)")
+        for program, wait in sorted(slow_transfers(option).items()):
+            lines.append(f"       slow transfer: {program} takes {wait.split(',')[0]}")
     return lines
 
 
@@ -290,6 +305,8 @@ def render_trip(
             out.append(f"  {label:<9}{legs}" + (f"   TOTAL ${total:,}" if total is not None else ""))
         if baseline.cabin_total is not None and baseline.economy_total is not None:
             out.append(f"  {cabin} costs ${baseline.cabin_total - baseline.economy_total:,} more than economy")
+        if baseline.fetched_at:
+            out.append(f"  fares fetched {baseline.fetched_at[:10]} (refreshed once older than {DEFAULT_MAX_CACHE_AGE.days} days)")
 
     affordable = [o for o in ranked if o.affordability.affordable]
     misses = [o for o in ranked if not o.affordability.affordable]
@@ -314,6 +331,7 @@ def render_trip(
                 head += f"   {value.cents_per_mile_vs_cabin:.2f} c/mile vs {cabin} cash"
             if value.cents_per_mile_vs_economy is not None:
                 head += f"   {value.cents_per_mile_vs_economy:.2f} c/mile vs economy cash"
+        head += f"   [{freshness_label(option, today)}]"
         out.append("")
         out.append(head)
         for label, itinerary in zip(("out ", "back"), option.itineraries):
@@ -379,6 +397,8 @@ def build_report(
         "  One ticket = same program and same-day connection (assumed, so verify: a program may price the\n"
         "  combined trip differently from its legs). Cash baselines are single tickets, so mixed-program\n"
         "  awards are not a like-for-like comparison on protection.\n"
+        f"  Freshness: award data {CURRENT_AWARD_DAYS} days old or newer is current, up to {STALE_AWARD_DAYS} days is aging, older is\n"
+        "  stale. Options rank by their stalest leg first, and alerts never fire on options resting on stale data.\n"
         "  Connections: same day with 2.5+ hours is preferred, under 2.5 hours warns, 1 hour or less is never\n"
         "  recommended. Flight times are local and come from Seats.aero's cached snapshot. Verify on the\n"
         "  airline's site before transferring Capital One miles, because transfers cannot be undone.\n"

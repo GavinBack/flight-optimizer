@@ -8,9 +8,13 @@ import sqlite3
 from datetime import date, datetime
 from pathlib import Path
 
-from flight_optimizer.affordability import CAPITAL_ONE_TRANSFERS, SOURCE_TO_PROGRAM, TripOption
+from flight_optimizer.affordability import (
+    SOURCE_TO_PROGRAM, TRANSFER_NOTES, TRANSFER_TIMES, TripOption, points_received, ratio_text, slow_transfers,
+)
 from flight_optimizer.alerts import Urgency, assess_urgency, heads_up, oldest_data, option_key, option_legs
 from flight_optimizer.analysis import TripAnalysis
+from flight_optimizer.programs import PROGRAM_NAMES
+from flight_optimizer.report import freshness_label
 from flight_optimizer.savings import estimate_value
 
 DEFAULT_DIRECTORY = Path("plans")
@@ -60,6 +64,7 @@ def render_plan(
         + (f"Award data as of {oldest_data(option)} (oldest leg). " if oldest_data(option) else "")
         + "Everything below is a snapshot: confirm each flight is still bookable.",
         f"Urgency: {urgency.label}. {urgency.reason}. (Seat counts are a guide, not a guarantee.)",
+        f"Data freshness: {freshness_label(option, generated_at.date())}.",
         "",
     ]
 
@@ -79,6 +84,13 @@ def render_plan(
         out.append(f"  - {note}")
 
     legs = option_legs(option)
+    programs = list(dict.fromkeys(SOURCE_TO_PROGRAM.get(leg.source, leg.source) for leg in legs))
+    out += ["", "BEFORE YOU START: you need a free account in each program below, to receive miles and to book"]
+    for program in programs:
+        name = PROGRAM_NAMES.get(program, program)
+        role = " (receives a Capital One transfer)" if program in option.affordability.transfers else " (paid from your own balance)"
+        extra = " plus a linked Virgin Red account, which is where the transfer goes" if program == "virginatlantic" else ""
+        out.append(f"  - {name}{role}{extra}")
     out += ["", "STEP 1. VERIFY every flight on the program's own site BEFORE moving any miles"]
     labels = iter("abcdefgh")
     for direction, itinerary in zip(("OUT ", "BACK"), option.itineraries):
@@ -101,12 +113,21 @@ def render_plan(
     out += ["", "STEP 2. TRANSFER from Capital One (this cannot be undone)"]
     if transfers:
         for program, miles in sorted(transfers.items()):
-            ratio = CAPITAL_ONE_TRANSFERS.get(program)
-            out.append(f"  Move {miles:,} Capital One miles to {program} (ratio {ratio} to 1).")
+            out.append(
+                f"  Move {miles:,} Capital One miles to {program} ({ratio_text(program)}: "
+                f"you receive {points_received(program, miles):,} points). Takes: {TRANSFER_TIMES[program]}."
+            )
+            if program in TRANSFER_NOTES:
+                out.append(f"    Note: {TRANSFER_NOTES[program]}")
         left = balances.get("capital_one", 0) - option.affordability.capital_one_used
         out.append(f"  Capital One miles left afterwards: {left:,}.")
-        out.append("  Only do this once every flight in step 1 is confirmed. Transfers are reported as 1:1 and")
-        out.append("  usually instant; confirm the current terms in your Capital One account.")
+        for program, wait in sorted(slow_transfers(option).items()):
+            out.append(
+                f"  WARNING: the {program} transfer takes {wait}. The seats may not last that long, "
+                "so check that the award space is still there when the points arrive."
+            )
+        out.append("  Only do this once every flight in step 1 is confirmed. Confirm the current terms in your")
+        out.append("  Capital One account before you transfer.")
     else:
         out.append("  No transfer needed: every leg is paid from the program's own balance.")
 

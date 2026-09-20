@@ -17,11 +17,12 @@ TODAY = date(2026, 9, 20)
 BALANCES = {"capital_one": 115_519, "american": 26_115, "delta": 14_049, "aeroplan": 0}
 
 
-def leg(origin, dest, source, miles, on, *, direct=True, seats=2, updated="2026-09-19T00:00:00Z", aid="", departs=None, arrives=None):
+def leg(origin, dest, source, miles, on, *, direct=True, seats=2, updated="2026-09-19T00:00:00Z", aid="", departs=None, arrives=None, stops=None):
     return AwardResult(
         source=source, origin=origin, destination=dest, date=on, cabin=Cabin.BUSINESS,
         miles=miles, total_taxes=0, currency="USD", remaining_seats=seats, airlines="XX",
         direct=direct, updated_at=updated, availability_id=aid, departs_at=departs, arrives_at=arrives,
+        stops=stops,
     )
 
 
@@ -485,3 +486,90 @@ def test_usage_line_is_unchanged_without_cache_hits(conn):
     text = build_report(conn, FakeAwards(), None, today=TODAY)
 
     assert "Seats.aero calls left today: 950" in text and "served from cache" not in text
+
+
+def test_the_payment_lines_flag_a_slow_transfer(conn):
+    slow = option(
+        [leg("RNO", "LAX", "qantas", 29_000, JAN9), leg("LAX", "SJO", "aeroplan", 25_000, JAN9)],
+        [leg("SJO", "LAX", "aeroplan", 25_000, JAN16), leg("LAX", "RNO", "delta", 10_900, JAN16)],
+    )
+
+    text = render(conn, [slow])
+
+    assert "slow transfer: qantas takes up to 36 hours" in text
+
+
+def test_connecting_legs_show_how_many_stops_they_have(conn):
+    stoppy = option(
+        [leg("RNO", "LAX", "american", 10_000, JAN9, direct=False, stops=1), leg("LAX", "SJO", "aeroplan", 25_000, JAN9)],
+        [leg("SJO", "LAX", "aeroplan", 25_000, JAN16), leg("LAX", "RNO", "delta", 10_000, date(2027, 1, 17), direct=False, stops=2)],
+    )
+
+    text = render(conn, [stoppy])
+
+    assert "connecting flights (*), check the routing: RNO>LAX american (1 stop), LAX>RNO delta (2 stops)" in text
+
+
+def test_connecting_legs_of_unknown_stop_count_are_listed_without_one(conn):
+    unknown = option(
+        [leg("RNO", "LAX", "american", 25_000, JAN9, direct=False), leg("LAX", "SJO", "aeroplan", 25_000, JAN9)],
+        [leg("SJO", "LAX", "aeroplan", 25_000, JAN16), leg("LAX", "RNO", "delta", 10_900, JAN16)],
+    )
+
+    assert "RNO>LAX american (" not in render(conn, [unknown])
+
+
+# --- freshness in the report ----------------------------------------------------------------------
+
+RICH = {"delta": 500_000, "capital_one": 500_000}
+
+
+def dated_option(updated):
+    return option(
+        [leg("RNO", "LAX", "delta", 10_900, JAN9, updated=updated), leg("LAX", "SJO", "aeroplan", 25_000, JAN9, updated=updated)],
+        [leg("SJO", "LAX", "aeroplan", 25_000, JAN16, updated=updated), leg("LAX", "RNO", "delta", 10_900, JAN16, updated=updated)],
+        RICH,
+    )
+
+
+def test_each_option_states_how_current_its_data_is(conn):
+    text = render(conn, [dated_option("2026-09-19T00:00:00Z")])
+
+    assert "[data current, oldest 1d]" in text
+
+
+def test_aging_and_stale_data_are_labelled_and_the_stale_label_is_loud(conn):
+    assert "[data aging, oldest 5d]" in render(conn, [dated_option("2026-09-15T00:00:00Z")])
+    assert "[DATA STALE, oldest 35d]" in render(conn, [dated_option("2026-08-16T00:00:00Z")])
+
+
+def test_the_freshness_label_uses_the_stalest_leg(conn):
+    mixed = option(
+        [leg("RNO", "LAX", "delta", 10_900, JAN9, updated="2026-09-19T00:00:00Z"), leg("LAX", "SJO", "aeroplan", 25_000, JAN9, updated="2026-08-01T00:00:00Z")],
+        [leg("SJO", "LAX", "aeroplan", 25_000, JAN16), leg("LAX", "RNO", "delta", 10_900, JAN16)],
+        RICH,
+    )
+
+    assert "[DATA STALE, oldest 50d]" in render(conn, [mixed])
+
+
+def test_the_report_footer_states_the_freshness_rule(conn):
+    add_trip(conn)
+
+    text = build_report(conn, FakeAwards(), None, today=TODAY)
+
+    assert "Freshness: award data 3 days old or newer is current, up to 7 days is aging, older is" in text
+    assert "alerts never fire on options resting on stale data" in text
+
+
+def test_cash_fares_show_when_they_were_fetched_and_the_refresh_window(conn):
+    fetched = TripBaseline(cabin_fares=BASELINE.cabin_fares, economy_fares=BASELINE.economy_fares,
+                           fetched_at="2026-09-20T07:00:00Z")
+
+    text = render(conn, [best_option()], baseline=fetched)
+
+    assert "fares fetched 2026-09-20 (refreshed once older than 2 days)" in text
+
+
+def test_no_fetch_line_when_the_baseline_has_no_fetch_time(conn):
+    assert "fares fetched" not in render(conn, [best_option()])

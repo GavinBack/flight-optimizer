@@ -58,7 +58,7 @@ def award_to_dict(result: AwardResult) -> dict:
         "direct": result.direct, "updated_at": result.updated_at,
         "availability_id": result.availability_id, "departs_at": _iso(result.departs_at),
         "arrives_at": _iso(result.arrives_at), "flight_numbers": result.flight_numbers,
-        "booking_url": result.booking_url,
+        "booking_url": result.booking_url, "stops": result.stops,
     }
 
 

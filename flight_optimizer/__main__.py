@@ -18,10 +18,11 @@ from datetime import datetime
 from pathlib import Path
 
 from flight_optimizer import db
-from flight_optimizer.alerts import assess_urgency, decide_alert, record_sent
+from flight_optimizer.alerts import assess_urgency, decide_alert, record_sent, usable_for_alert
 from flight_optimizer.analysis import analyze_trip
 from flight_optimizer.cash_fares import SerpApiClient
 from flight_optimizer.config import ConfigError, Settings, load_settings
+from flight_optimizer.itineraries import STALE_AWARD_DAYS
 from flight_optimizer.notify import NtfyClient, NtfyError
 from flight_optimizer.plans import latest_plan, render_plan, save_plan
 from flight_optimizer.programs import PROGRAM_NAMES, format_balances, parse_miles, resolve_program
@@ -118,7 +119,13 @@ def _run_notify(conn, clients: Clients, plans_dir: Path, *, dry_run: bool, now: 
         analysis = analyze_trip(conn, clients.awards, clients.cash, trip, balances)
         alert = decide_alert(conn, analysis, now=now)
         if alert is None:
-            print(f"{trip['name']}: nothing new to alert on.")
+            if analysis.affordable and not usable_for_alert(analysis, now.date()):
+                print(
+                    f"{trip['name']}: affordable options exist, but every one relies on award data older "
+                    f"than {STALE_AWARD_DAYS} days, so no alert was sent. Run the report to see them."
+                )
+            else:
+                print(f"{trip['name']}: nothing new to alert on.")
             continue
         if dry_run:
             print(f"--- would send for {trip['name']} (priority {alert.priority}) ---")

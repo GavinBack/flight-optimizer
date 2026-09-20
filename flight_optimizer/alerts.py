@@ -10,9 +10,10 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
 from flight_optimizer import db
-from flight_optimizer.affordability import TripOption
+from flight_optimizer.affordability import TripOption, slow_transfers
 from flight_optimizer.analysis import TripAnalysis
 from flight_optimizer.connections import ConnectionClass
+from flight_optimizer.itineraries import Freshness, is_stale
 from flight_optimizer.savings import estimate_value
 
 RE_ALERT_DAYS = 7  # don't repeat the same option within this window unless it got cheaper
@@ -77,7 +78,8 @@ def _hm(minutes: int) -> str:
     return f"{minutes // 60}h{minutes % 60:02d}m"
 
 
-def heads_up(option: TripOption) -> list[str]:
+def heads_up(option: TripOption, today: date | None = None) -> list[str]:
+    today = today or date.today()
     notes = []
     for it in option.itineraries:
         hub = it.via or ""
@@ -85,8 +87,18 @@ def heads_up(option: TripOption) -> list[str]:
             notes.append(f"tight {_hm(it.connection_minutes)} connection at {hub}")
         elif it.connection_class is ConnectionClass.OVERNIGHT:
             notes.append(f"overnight at {hub}")
+    for it in option.itineraries:
+        if len(it.legs) == 2:
+            for leg in it.legs:
+                if (leg.stops or 0) >= 2:
+                    notes.append(f"{leg_name(leg)} is {leg.stops + 1} flights")
+    stale = [f"{leg_name(leg)} ({leg.updated_at[:10]})" for leg in option_legs(option) if is_stale(leg, today)]
+    if stale:
+        notes.append("stale data: " + ", ".join(stale))
     if option.self_transfers:
         notes.append("separate bookings: bags re-checked, no missed-connection cover")
+    for program, wait in sorted(slow_transfers(option).items()):
+        notes.append(f"{program} transfer takes {wait.split(',')[0]}")
     return notes
 
 
@@ -167,15 +179,21 @@ def _parse_time(value: str) -> datetime:
     return datetime.strptime(value, _TIME_FORMAT).replace(tzinfo=timezone.utc)
 
 
+def usable_for_alert(analysis: TripAnalysis, today: date) -> list[TripOption]:
+    """Affordable options whose data is not stale. Offers and availability should be
+    current, so an option resting on old data is never alerted on (the report still lists it)."""
+    return [o for o in analysis.affordable if o.freshness(today) is not Freshness.STALE]
+
+
 def decide_alert(
     conn: sqlite3.Connection, analysis: TripAnalysis, *, now: datetime | None = None
 ) -> Alert | None:
-    """An alert for the trip's best affordable option, or None if there's nothing new.
+    """An alert for the trip's best affordable option with current-enough data, or None.
 
     Suppressed when the same option was alerted within `RE_ALERT_DAYS` and hasn't
     got cheaper since (the README's re-alert rule).
     """
-    affordable = analysis.affordable
+    affordable = usable_for_alert(analysis, now.date() if now else date.today())
     if not affordable:
         return None
     best = affordable[0]

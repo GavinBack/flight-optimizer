@@ -8,6 +8,7 @@ origin->hub and hub->destination separately and pair them ourselves.
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, timedelta
+from enum import IntEnum
 
 from flight_optimizer import connections, db
 from flight_optimizer.connections import ConnectionClass
@@ -16,6 +17,39 @@ from flight_optimizer.seats_aero import AwardResult, Cabin, SeatsAeroClient
 
 # Legs reporting fewer seats than this are treated as unbookable. Set to 0 to keep them.
 MIN_SEATS = 1
+
+# Owner's rule: offers and availability should be current. Award data is judged by its age in
+# days, and an option by its stalest leg (an option is only as reliable as its weakest leg).
+CURRENT_AWARD_DAYS = 3  # this fresh or fresher is "current"
+STALE_AWARD_DAYS = 7  # older than this is "stale": ranked last, and never alerted on
+
+
+class Freshness(IntEnum):
+    """Lower is better. The value is the ranking penalty."""
+
+    CURRENT = 0
+    AGING = 1
+    STALE = 2
+
+
+def leg_age_days(leg: AwardResult, today: date) -> int | None:
+    """Days since Seats.aero last refreshed this leg, or None if unknown."""
+    if not leg.updated_at:
+        return None
+    return (today - date.fromisoformat(leg.updated_at[:10])).days
+
+
+def leg_freshness(leg: AwardResult, today: date) -> Freshness:
+    age = leg_age_days(leg, today)
+    if age is None:
+        return Freshness.AGING  # can't confirm it is current, but nothing says it is stale
+    if age <= CURRENT_AWARD_DAYS:
+        return Freshness.CURRENT
+    return Freshness.AGING if age <= STALE_AWARD_DAYS else Freshness.STALE
+
+
+def is_stale(leg: AwardResult, today: date) -> bool:
+    return leg_freshness(leg, today) is Freshness.STALE
 
 
 @dataclass(frozen=True)
@@ -49,6 +83,26 @@ class Itinerary:
         first, second = self.legs
         same_ticket = first.source == second.source and first.date == second.date
         return 0 if same_ticket else 1
+
+    @property
+    def hub_leg_stops(self) -> int:
+        """Stops inside the two legs of a hub itinerary (0 for a single-leg itinerary, where
+        stops are inherent to the trip, or when the stops are not known yet)."""
+        if len(self.legs) != 2:
+            return 0
+        return sum(leg.stops or 0 for leg in self.legs)
+
+    def freshness(self, today: date) -> Freshness:
+        """The stalest of this itinerary's legs."""
+        return max(leg_freshness(leg, today) for leg in self.legs)
+
+    def oldest_age_days(self, today: date) -> int | None:
+        ages = [age for leg in self.legs if (age := leg_age_days(leg, today)) is not None]
+        return max(ages) if ages else None
+
+    def stale_legs(self, today: date) -> int:
+        """How many legs have award data older than STALE_AWARD_DAYS."""
+        return sum(1 for leg in self.legs if is_stale(leg, today))
 
     @property
     def connection_minutes(self) -> int | None:

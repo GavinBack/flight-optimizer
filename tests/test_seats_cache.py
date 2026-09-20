@@ -88,7 +88,7 @@ def test_award_result_survives_a_round_trip_with_and_without_times():
     plain = award()
     timed = AwardResult(**{**plain.__dict__, "departs_at": datetime(2027, 1, 9, 13, 40),
                             "arrives_at": datetime(2027, 1, 9, 23, 15), "flight_numbers": "AV641",
-                            "booking_url": "https://x.test"})
+                            "booking_url": "https://x.test", "stops": 2})
 
     assert award_from_dict(award_to_dict(plain)) == plain
     assert award_from_dict(award_to_dict(timed)) == timed
@@ -358,3 +358,10 @@ def test_a_failed_lookup_still_counts_against_the_budget(conn):
                               max_lookups_per_direction=2)
 
     assert stats.lookups == 2 and stats.budget_reached and stats.unverifiable == 2
+
+
+def test_search_results_cached_before_stops_existed_still_load():
+    old_style = award_to_dict(award())
+    del old_style["stops"]
+
+    assert award_from_dict(old_style).stops is None

@@ -4,7 +4,10 @@ import pytest
 
 from flight_optimizer import db
 from flight_optimizer.itineraries import (
+    STALE_AWARD_DAYS,
+    Itinerary,
     combine_via_gateway,
+    is_stale,
     search_active_trips,
     search_one_way,
     search_trip,
@@ -222,3 +225,68 @@ def test_search_active_trips_skips_inactive_trips(conn):
     assert inactive_id not in results
     # The inactive trip's searches never happened.
     assert client.calls and all(call[2] in (JAN9, JAN16) for call in client.calls)
+
+
+# --- stops inside hub legs, and stale award data ---------------------------------------
+
+def stopped(origin, dest, stops, source="aeroplan"):
+    from dataclasses import replace
+    return replace(award(origin, dest, JAN9, 1, source=source), stops=stops)
+
+
+def test_hub_leg_stops_sums_the_two_legs_of_a_hub_itinerary():
+    hub = Itinerary(legs=(stopped("RNO", "LAX", 1), stopped("LAX", "SJO", 2)), via="LAX")
+
+    assert hub.hub_leg_stops == 3
+
+
+def test_stops_on_a_single_leg_itinerary_are_not_counted_because_they_are_inherent_to_the_trip():
+    single = Itinerary(legs=(stopped("RNO", "SJO", 2),), via=None)
+
+    assert single.hub_leg_stops == 0
+
+
+def test_unknown_stops_count_as_none():
+    hub = Itinerary(legs=(award("RNO", "LAX", JAN9, 1), award("LAX", "SJO", JAN9, 1)), via="LAX")
+
+    assert hub.hub_leg_stops == 0
+
+
+TODAY = date(2026, 9, 20)
+
+
+def dated(updated):
+    from dataclasses import replace
+    return replace(award("RNO", "LAX", JAN9, 1), updated_at=updated)
+
+
+def test_data_is_stale_only_after_the_threshold():
+    assert STALE_AWARD_DAYS == 7
+    assert not is_stale(dated("2026-09-13T00:00:00Z"), TODAY)   # exactly 7 days
+    assert is_stale(dated("2026-09-12T00:00:00Z"), TODAY)       # 8 days
+    assert not is_stale(dated("2026-09-20T05:00:00Z"), TODAY)
+
+
+def test_unknown_data_age_is_not_treated_as_stale():
+    assert not is_stale(dated(""), TODAY)
+
+
+def test_an_itinerary_counts_its_stale_legs():
+    hub = Itinerary(legs=(dated("2026-08-01T00:00:00Z"), dated("2026-09-19T00:00:00Z")), via="LAX")
+
+    assert hub.stale_legs(TODAY) == 1
+
+
+def test_an_itinerary_is_as_current_as_its_stalest_leg_and_reports_its_oldest_age():
+    from flight_optimizer.itineraries import Freshness
+
+    hub = Itinerary(legs=(dated("2026-09-19T00:00:00Z"), dated("2026-08-01T00:00:00Z")), via="LAX")
+
+    assert hub.freshness(TODAY) is Freshness.STALE
+    assert hub.oldest_age_days(TODAY) == 50
+
+
+def test_unknown_ages_give_no_oldest_age():
+    hub = Itinerary(legs=(dated(""), dated("")), via="LAX")
+
+    assert hub.oldest_age_days(TODAY) is None

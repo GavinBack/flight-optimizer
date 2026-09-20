@@ -59,6 +59,7 @@ class AwardResult:
     arrives_at: datetime | None = None  # local time at the destination airport
     flight_numbers: str = ""
     booking_url: str = ""  # pre-filled search on the program's own site
+    stops: int | None = None  # stops within this leg; known only after a trips lookup
 
 
 @dataclass(frozen=True)

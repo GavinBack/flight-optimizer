@@ -125,3 +125,24 @@ def test_trip_baseline_reuses_the_cache_on_a_second_call(conn):
     trip_baseline(conn, client, trip)
 
     assert len(client.calls) == 2
+
+
+def test_the_baseline_records_the_age_of_its_oldest_search(conn):
+    import json
+    from dataclasses import asdict
+    from datetime import timedelta
+
+    older = (datetime.now(timezone.utc) - timedelta(hours=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    db.save_cash_fares(conn, origin="RNO", destination="SJO", travel_date=JAN9, cabin="business",
+                       fares_json=json.dumps([asdict(fare(1505))]), lowest_price=None, typical_low=None,
+                       typical_high=None, fetched_at=older)
+    client = RecordingClient({("RNO", "SJO", Cabin.ECONOMY): [fare(323)]})
+
+    baseline = trip_baseline(conn, client, add_trip(conn, return_date=None))
+
+    assert baseline.fetched_at == older  # the cached business search is the older of the two
+    assert [c[3] for c in client.calls] == [Cabin.ECONOMY]  # and it was reused, not re-searched
+
+
+def test_a_baseline_built_by_hand_has_no_fetch_time():
+    assert TripBaseline(cabin_fares=(None,), economy_fares=(None,)).fetched_at is None

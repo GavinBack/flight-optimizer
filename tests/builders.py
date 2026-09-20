@@ -12,16 +12,18 @@ from flight_optimizer.savings import TripBaseline
 from flight_optimizer.seats_aero import AwardResult, Cabin
 
 JAN9, JAN10, JAN16 = date(2027, 1, 9), date(2027, 1, 10), date(2027, 1, 16)
+# Award data dated yesterday: always "current", whenever the tests run.
+RECENT = (date.today() - timedelta(days=1)).isoformat() + "T00:00:00Z"
 BALANCES = {"capital_one": 115_519, "american": 26_115, "delta": 30_000, "aeroplan": 0}
 
 
-def leg(origin, dest, source, miles, on, *, direct=True, seats=5, updated="2026-09-19T00:00:00Z",
-        departs=None, arrives=None, flights="", url=""):
+def leg(origin, dest, source, miles, on, *, direct=True, seats=5, updated=RECENT,
+        departs=None, arrives=None, flights="", url="", stops=None):
     return AwardResult(
         source=source, origin=origin, destination=dest, date=on, cabin=Cabin.BUSINESS,
         miles=miles, total_taxes=10_600, currency="CAD", remaining_seats=seats, airlines="XX",
         direct=direct, updated_at=updated, departs_at=departs, arrives_at=arrives,
-        flight_numbers=flights, booking_url=url,
+        flight_numbers=flights, booking_url=url, stops=stops,
     )
 
 
@@ -34,7 +36,7 @@ def at(day, hour, minute=0):
     return datetime(day.year, day.month, day.day, hour, minute)
 
 
-def good_option(*, seats=5, out_miles=10_900, flights=("UA1", "AV641", "AV654", "DL9"), updated="2026-09-19T00:00:00Z"):
+def good_option(*, seats=5, out_miles=10_900, flights=("UA1", "AV641", "AV654", "DL9"), updated=RECENT):
     """Round trip through LAX with 4-hour connections, two programs each way."""
     a, b, c, d = flights
     return option(

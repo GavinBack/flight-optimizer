@@ -246,3 +246,15 @@ def test_enrich_result_handles_both_directions():
                                 balances={"delta": 100_000, "capital_one": 100_000})
 
     assert len(enriched.outbound) == 1 and len(enriched.return_trip) == 1
+
+
+def test_the_chosen_flights_stop_count_is_recorded_on_the_leg():
+    client = FakeClient({
+        "A": details(arriving_at_hub()),
+        "B": details(flight(LAND + timedelta(hours=4), stops=2, numbers="AA1, AA2, AA3")),
+    })
+
+    enriched, _ = run(client, two_leg())
+
+    assert enriched.legs[0].stops == 0 and enriched.legs[1].stops == 2
+    assert enriched.hub_leg_stops == 2 and enriched.legs[1].direct is False

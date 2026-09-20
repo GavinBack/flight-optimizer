@@ -31,8 +31,9 @@ TRAVEL_CLASS = {
 DEFAULT_MAX_LAYOVER_MINUTES = 240
 DEFAULT_MAX_TOTAL_MINUTES = 900
 
-# Cash prices move slowly compared with award space, and searches are scarce.
-DEFAULT_MAX_CACHE_AGE = timedelta(days=7)
+# Offers should be current, but SerpApi's free plan is 250 searches a month. A round trip needs 4
+# searches (business and economy, each way), so refreshing every 2 days is about 60 a month.
+DEFAULT_MAX_CACHE_AGE = timedelta(days=2)
 
 _TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 

@@ -76,6 +76,7 @@ def _with_flight(leg: AwardResult, option: FlightOption, details: TripDetails) -
         miles=option.miles,
         remaining_seats=option.seats,
         direct=option.stops == 0,
+        stops=option.stops,
         total_taxes=option.total_taxes,
         currency=option.currency or leg.currency,
         updated_at=option.updated_at or leg.updated_at,

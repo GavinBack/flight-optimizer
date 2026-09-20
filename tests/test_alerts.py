@@ -1,13 +1,13 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
 from builders import (
-    JAN9, JAN10, JAN16, add_trip, analysis_for, at, baseline, good_option, leg, option,
+    JAN9, JAN10, JAN16, RECENT, add_trip, analysis_for, at, baseline, good_option, leg, option,
 )
 from flight_optimizer import db
 from flight_optimizer.alerts import (
-    RE_ALERT_DAYS, assess_urgency, build_alert, decide_alert, option_key, record_sent,
+    RE_ALERT_DAYS, assess_urgency, build_alert, decide_alert, option_key, record_sent, usable_for_alert,
 )
 
 
@@ -127,7 +127,10 @@ def test_with_no_other_option_the_message_says_so(conn):
 
 
 def test_the_data_age_is_stated(conn):
-    _, _, alert = alert_for(conn, [good_option(updated="2026-08-16T00:00:00Z")])
+    trip = add_trip(conn)
+    stale = good_option(updated="2026-08-16T00:00:00Z")
+
+    alert = build_alert(analysis_for(trip, [stale]), stale, fallback=None)  # bypasses the freshness gate
 
     assert "Data as of 2026-08-16." in alert.message
 
@@ -161,8 +164,9 @@ def test_the_same_option_alerts_again_after_the_window(conn):
     trip, analysis, first = alert_for(conn, [good_option()])
     record_sent(conn, first)
     later = datetime.now(timezone.utc) + timedelta(days=RE_ALERT_DAYS + 1)
+    refreshed = good_option(updated=later.date().isoformat() + "T00:00:00Z")  # Seats.aero refreshed it meanwhile
 
-    assert decide_alert(conn, analysis, now=later) is not None
+    assert decide_alert(conn, analysis_for(trip, [refreshed]), now=later) is not None
 
 
 def test_a_cheaper_price_for_the_same_option_alerts_immediately(conn):
@@ -205,3 +209,115 @@ def test_record_sent_stores_the_key_miles_and_plan_path(conn):
     row = db.last_alert(conn, trip["id"], alert.key)
     assert row["miles"] == 71_800 and row["details"] == "plans/1-costa-rica.txt"
     assert row["alert_type"] == "award"
+
+
+def test_a_slow_transfer_is_flagged_in_the_alert_note(conn):
+    slow = option(
+        [leg("RNO", "LAX", "qantas", 29_000, JAN9, departs=at(JAN9, 7), arrives=at(JAN9, 10)),
+         leg("LAX", "SJO", "aeroplan", 25_000, JAN9, departs=at(JAN9, 14), arrives=at(JAN9, 20))],
+        [leg("SJO", "LAX", "aeroplan", 25_000, JAN16, departs=at(JAN16, 6), arrives=at(JAN16, 10)),
+         leg("LAX", "RNO", "delta", 10_900, JAN16, departs=at(JAN16, 14), arrives=at(JAN16, 16))],
+    )
+
+    _, _, alert = alert_for(conn, [slow])
+
+    note = next(line for line in alert.message.split("\n") if line.startswith("Note:"))
+    assert "qantas transfer takes up to 36 hours" in note and "aeroplan transfer" not in note
+
+
+def test_instant_transfers_add_nothing_to_the_alert(conn):
+    _, _, alert = alert_for(conn, [good_option()])
+
+    assert "transfer takes" not in alert.message
+
+
+def hub_option(*, out_stops=0, back_stops=0, updated=RECENT):
+    return option(
+        [leg("RNO", "LAX", "delta", 10_900, JAN9, departs=at(JAN9, 7), arrives=at(JAN9, 10), stops=out_stops, updated=updated),
+         leg("LAX", "SJO", "aeroplan", 25_000, JAN9, departs=at(JAN9, 14), arrives=at(JAN9, 20), stops=0, updated=updated)],
+        [leg("SJO", "LAX", "aeroplan", 25_000, JAN16, departs=at(JAN16, 6), arrives=at(JAN16, 10), stops=0, updated=updated),
+         leg("LAX", "RNO", "delta", 10_900, JAN16, departs=at(JAN16, 14), arrives=at(JAN16, 16), stops=back_stops, updated=updated)],
+    )
+
+
+def note_of(alert):
+    return next((line for line in alert.message.split("\n") if line.startswith("Note:")), "")
+
+
+def test_a_hub_leg_of_several_flights_is_called_out(conn):
+    _, _, alert = alert_for(conn, [hub_option(back_stops=2)])
+
+    assert "LAX>RNO delta is 3 flights" in note_of(alert)
+
+
+def test_a_hub_leg_with_a_single_stop_is_not_called_out(conn):
+    _, _, alert = alert_for(conn, [hub_option(out_stops=1, back_stops=1)])
+
+    assert "flights" not in note_of(alert)
+
+
+def test_stale_data_is_named_in_the_note(conn):
+    trip = add_trip(conn)
+    stale = hub_option(updated="2020-01-01T00:00:00Z")
+
+    alert = build_alert(analysis_for(trip, [stale]), stale, fallback=None)
+
+    assert "stale data: RNO>LAX delta (2020-01-01)" in note_of(alert)
+
+
+def test_fresh_data_adds_no_stale_note(conn):
+    fresh = date.today().isoformat() + "T00:00:00Z"
+
+    _, _, alert = alert_for(conn, [hub_option(updated=fresh)])
+
+    assert "stale data" not in note_of(alert)
+
+
+# --- freshness: alerts never fire on stale data ---------------------------------------------
+
+def days_ago(days):
+    return (date.today() - timedelta(days=days)).isoformat() + "T00:00:00Z"
+
+
+def test_an_option_resting_on_stale_data_is_never_alerted_on(conn):
+    trip = add_trip(conn)
+
+    assert decide_alert(conn, analysis_for(trip, [good_option(updated=days_ago(8))])) is None
+
+
+def test_aging_data_is_still_alerted_on_but_flagged(conn):
+    trip = add_trip(conn)
+
+    alert = decide_alert(conn, analysis_for(trip, [good_option(updated=days_ago(6))]))
+
+    assert alert is not None and f"Data as of {days_ago(6)[:10]}." in alert.message
+
+
+def test_the_alert_goes_to_the_best_option_that_is_not_stale_even_if_a_stale_one_ranks_first(conn):
+    trip = add_trip(conn)
+    stale_first = good_option(updated=days_ago(20))
+    current_second = good_option(flights=("UA9", "AV641", "AV654", "DL9"))
+
+    alert = decide_alert(conn, analysis_for(trip, [stale_first, current_second]))
+
+    assert alert is not None and option_key(alert.option) == option_key(current_second)
+
+
+def test_the_fallback_is_also_current(conn):
+    trip = add_trip(conn)
+    best = good_option()
+    stale_next = good_option(out_miles=15_000, flights=("UA7", "AV641", "AV654", "DL9"), updated=days_ago(30))
+
+    alert = decide_alert(conn, analysis_for(trip, [best, stale_next]))
+
+    assert "no other affordable option right now" in alert.message
+
+
+def test_usable_for_alert_keeps_current_and_aging_and_drops_stale(conn):
+    trip = add_trip(conn)
+    options = [good_option(updated=days_ago(1)), good_option(updated=days_ago(7), flights=("A", "B", "C", "D")),
+               good_option(updated=days_ago(8), flights=("E", "F", "G", "H"))]
+
+    kept = usable_for_alert(analysis_for(trip, options), date.today())
+
+    assert kept == options[:2]

@@ -282,3 +282,15 @@ def test_cache_stores_every_fare_so_limits_can_change_without_searching(conn):
     assert cheapest_reasonable(cached.fares, max_layover_minutes=1000, max_total_minutes=2000).price == 618
     assert len(session.requests) == 1
     assert json.loads(conn.execute("SELECT fares_json FROM cash_fare_cache").fetchone()[0])
+
+
+def test_cash_fares_are_refreshed_after_two_days_not_a_week(conn):
+    from flight_optimizer.cash_fares import DEFAULT_MAX_CACHE_AGE
+    client, session = make_client(FakeResponse(ok_body(best=[raw_fare(618)])), FakeResponse(ok_body(best=[raw_fare(700)])))
+    get_fares(conn, client, "RNO", "SJO", JAN9, Cabin.BUSINESS, now=NOW)
+
+    assert DEFAULT_MAX_CACHE_AGE == timedelta(days=2)
+    assert get_fares(conn, client, "RNO", "SJO", JAN9, Cabin.BUSINESS, now=NOW + timedelta(hours=47)).from_cache
+    refreshed = get_fares(conn, client, "RNO", "SJO", JAN9, Cabin.BUSINESS, now=NOW + timedelta(hours=49))
+
+    assert not refreshed.from_cache and refreshed.fares[0].price == 700 and len(session.requests) == 2

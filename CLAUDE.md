@@ -24,7 +24,8 @@ pytest                                    # all tests; none touch the network or
 pytest tests/test_db.py::test_name        # a single test
 python -m flight_optimizer [--top N]    # live report for active trips; ~18 Seats.aero calls, cash prices come from the cache
 python -m flight_optimizer notify [--dry-run]   # ntfy alert for anything new (dry run prints it, sends and saves nothing)
-python -m flight_optimizer plan [TRIP] [--refresh]   # show the saved booking plan (--refresh re-searches: ~60 API calls)
+python -m flight_optimizer plan [TRIP] [--refresh]   # show the saved booking plan (--refresh re-searches; a cold run is ~45 API calls, less with the cache)
+python -m flight_optimizer --fresh <command>   # skip the 1-hour search cache (flight details Seats.aero hasn't changed are still reused)
 python -m flight_optimizer done TRIP    # mark a trip booked: inactive, so no more searching or alerts
 python -m flight_optimizer test-notification   # check ntfy reaches the phone
 
@@ -48,6 +49,8 @@ Seats.aero specifics that aren't obvious from the code:
 - `db.active_trips()` is the single gate for the `active` rule below. Route every trip-driven job through it.
 - Ranking prefers fewer self-transfers over lower miles (`Itinerary.self_transfers`): one ticket is a heuristic (same program and same-day connection), because separate tickets mean bags are re-checked and the airline doesn't cover a missed connection. It's the owner's stated preference, so don't rank by price alone.
 - `trips` data: times are labeled `Z` but are local to each airport (fine for a hub connection, wrong across time zones). Each flight has its own price, which can exceed the cheapest row price, so enrichment re-prices the itinerary from the flights it actually picks. `TotalTaxes` looks like hundredths of the currency. `booking_links` are pre-filled searches on each program's site but may not set the cabin.
+- Each trip's gateway hubs live in the local database (`trip_gateways`), not in git. Costa Rica uses LAX only: DEN, DFW and SFO were tested and dropped as unproductive (no fundable itineraries). Searches cost roughly 2 per direction for the direct pair plus up to 2 per gateway per direction, so every extra gateway adds API calls.
+- Seats.aero calls go through `seats_cache.CachedSeatsAero` (built in `__main__.default_clients`). `trips` lookups are cached by (row id, row `UpdatedAt`) with no expiry, because that stamp equals every flight entry's stamp; searches expire after 1 hour. Always pass the row's `updated_at` as `version` when calling `trips`, or nothing is cached. Cache hits don't count against `max_lookups_per_direction` (that budget protects the API quota). Failed calls are never cached.
 - Connection rules (owner's decision, `connections.py`): same day with 2.5h+ preferred; over 1h and under 2.5h warns; 1h or less is never recommended (also applied to cash fares); overnight ranks below any same-day connection. Ranking is `(affordable, self-transfers, connection class, miles)`.
 - Alerts: `notify` alerts only on the best affordable option, once per exact set of flights per 7 days unless it got cheaper. The alert is a short summary with an urgency line (seat-count based, a guide not a prediction) and never includes balances. The detailed steps live in a saved plan for the laptop. `NTFY_TOPIC` acts as a password on the public server: never print or commit it.
 - Affordability: each program's own balance is used first, then the shared Capital One balance covers shortfalls only for partners listed in `CAPITAL_ONE_TRANSFERS` (verified 1:1 only; an unlisted program must be paid from its own balance). Round trips are assessed jointly so both directions share balances.

@@ -226,7 +226,7 @@ class FakeAwards:
         self.details = details or {}
         self.calls = []
 
-    def trips(self, availability_id):
+    def trips(self, availability_id, version=None):
         return self.details[availability_id]
 
     def search(self, origin, destination, start, end, **_):
@@ -453,3 +453,35 @@ def test_build_report_drops_options_whose_connection_is_an_hour_or_less(conn):
 
     assert "0 of 0 combinations" in text
     assert "1 dropped for a connection of 1 hour or less" in text
+
+
+def test_stats_line_says_how_many_lookups_came_from_cache(conn):
+    stats = EnrichmentStats(lookups=3, cache_hits=11)
+
+    text = render(conn, [best_option()], stats=stats)
+
+    assert "Flight times checked for the leading options (3 lookups, 11 reused from cache)" in text
+
+
+def test_stats_line_appears_even_when_everything_came_from_cache(conn):
+    text = render(conn, [best_option()], stats=EnrichmentStats(lookups=0, cache_hits=8))
+
+    assert "(0 lookups, 8 reused from cache)" in text
+
+
+def test_usage_line_mentions_cache_use_when_the_client_reports_it(conn):
+    add_trip(conn)
+    awards = FakeAwards()
+    awards.cache_hits = 14
+
+    text = build_report(conn, awards, None, today=TODAY)
+
+    assert "Seats.aero calls left today: 950 (14 lookups served from cache)" in text
+
+
+def test_usage_line_is_unchanged_without_cache_hits(conn):
+    add_trip(conn)
+
+    text = build_report(conn, FakeAwards(), None, today=TODAY)
+
+    assert "Seats.aero calls left today: 950" in text and "served from cache" not in text

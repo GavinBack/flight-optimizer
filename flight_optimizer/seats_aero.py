@@ -128,6 +128,7 @@ class TripDetails:
     options: tuple[FlightOption, ...]
     booking_url: str  # the primary (program's own) pre-filled link, or ""
     booking_links: tuple[tuple[str, str], ...]  # (label, url) for every program that can book it
+    from_cache: bool = False  # True when reused from the local cache (no API call)
 
 
 def _local_time(value: str) -> datetime:
@@ -182,8 +183,10 @@ class SeatsAeroClient:
         self._timeout = timeout
         # Updated after every response; None until the first call.
         self.calls_remaining: int | None = None
+        self.calls_made = 0  # API calls made by this client object
 
     def _get(self, path: str, params: dict) -> dict:
+        self.calls_made += 1
         response = self._session.get(
             f"{self._base_url}/{path}",
             params=params,
@@ -207,9 +210,10 @@ class SeatsAeroClient:
             raise SeatsAeroError(f"Seats.aero returned HTTP {status}: {response.text[:200]}", status)
         return response.json()
 
-    def trips(self, availability_id: str) -> TripDetails:
+    def trips(self, availability_id: str, version: str | None = None) -> TripDetails:
         """Flight-level details (times, cost, seats, booking links) behind one search
-        result. Costs one API call."""
+        result. Costs one API call. `version` (the row's UpdatedAt) is ignored here; it
+        lets a caching wrapper share this signature."""
         return parse_trips(self._get(f"trips/{availability_id}", {}))
 
     def search_page(

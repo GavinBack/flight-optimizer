@@ -199,9 +199,10 @@ def _miss_text(option: TripOption) -> str:
 
 
 def _stats_line(stats: EnrichmentStats | None) -> str | None:
-    if stats is None or not (stats.lookups or stats.dropped_unsafe or stats.unverifiable):
+    if stats is None or not (stats.lookups or stats.cache_hits or stats.dropped_unsafe or stats.unverifiable):
         return None
-    parts = [f"Flight times checked for the leading options ({stats.lookups} lookups)"]
+    reused = f", {stats.cache_hits} reused from cache" if stats.cache_hits else ""
+    parts = [f"Flight times checked for the leading options ({stats.lookups} lookups{reused})"]
     if stats.dropped_unsafe:
         parts.append(f"{stats.dropped_unsafe} dropped for a connection of {MIN_CONNECTION_MINUTES // 60} hour or less")
     if stats.unverifiable:
@@ -364,7 +365,11 @@ def build_report(
 
     usage = []
     if awards.calls_remaining is not None:
-        usage.append(f"Seats.aero calls left today: {awards.calls_remaining}")
+        served = getattr(awards, "cache_hits", 0)
+        usage.append(
+            f"Seats.aero calls left today: {awards.calls_remaining}"
+            + (f" ({served} lookups served from cache)" if served else "")
+        )
     if cash is not None:
         usage.append(f"SerpApi searches this run: {cash.searches_made} (cached results are free)")
     sections.append(

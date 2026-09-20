@@ -32,7 +32,8 @@ DEFAULT_MAX_LOOKUPS_PER_DIRECTION = 20  # API calls allowed per direction
 
 @dataclass
 class EnrichmentStats:
-    lookups: int = 0  # trips calls made
+    lookups: int = 0  # real API calls made (cache hits are not counted)
+    cache_hits: int = 0  # flight details reused from the local cache
     dropped_unsafe: int = 0  # every flight pairing had a connection of 1 hour or less
     unverifiable: int = 0  # no flight details, or no bookable flights in the cabin
     budget_reached: bool = False  # stopped early to protect the API quota
@@ -40,20 +41,27 @@ class EnrichmentStats:
 
 def _details(
     client: SeatsAeroClient,
-    availability_id: str,
+    leg: AwardResult,
     cache: dict[str, TripDetails | None],
     stats: EnrichmentStats,
 ) -> TripDetails | None:
-    if availability_id in cache:
-        return cache[availability_id]
-    stats.lookups += 1
+    if leg.availability_id in cache:
+        return cache[leg.availability_id]
     try:
-        details = client.trips(availability_id)
+        # The row's UpdatedAt is the version: an unchanged one lets a caching client
+        # reuse the flights without an API call.
+        details = client.trips(leg.availability_id, version=leg.updated_at)
     except (SeatsAeroAuthError, SeatsAeroRateLimitError):
         raise  # not this itinerary's problem: stop the whole run
     except SeatsAeroError:
+        stats.lookups += 1  # the failed call still spent quota
         details = None
-    cache[availability_id] = details
+    else:
+        if details.from_cache:
+            stats.cache_hits += 1
+        else:
+            stats.lookups += 1
+    cache[leg.availability_id] = details
     return details
 
 
@@ -90,7 +98,7 @@ def enrich_itinerary(
     """The itinerary with real flights chosen, or None if it can't be recommended."""
     details: list[TripDetails] = []
     for leg in itinerary.legs:
-        found = _details(client, leg.availability_id, cache, stats) if leg.availability_id else None
+        found = _details(client, leg, cache, stats) if leg.availability_id else None
         if found is None:
             stats.unverifiable += 1
             return None

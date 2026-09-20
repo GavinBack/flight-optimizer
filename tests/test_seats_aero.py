@@ -255,3 +255,21 @@ def test_client_trips_calls_the_trips_endpoint_with_the_row_id():
 
 def test_parse_availability_keeps_the_row_id_for_later_lookups():
     assert parse_availability(make_row("row-42"))[0].availability_id == "row-42"
+
+
+def test_calls_made_counts_every_api_call_including_failed_ones():
+    client, _ = make_client(FakeResponse({"data": []}), FakeResponse(trips_body()), FakeResponse(status_code=500))
+
+    assert client.calls_made == 0
+    search(client)
+    client.trips("abc", version="ignored-by-the-raw-client")
+    with pytest.raises(SeatsAeroError):
+        search(client)
+
+    assert client.calls_made == 3
+
+
+def test_trips_results_from_the_api_are_not_marked_as_cached():
+    client, _ = make_client(FakeResponse(trips_body()))
+
+    assert client.trips("abc").from_cache is False

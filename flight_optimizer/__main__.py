@@ -5,6 +5,8 @@
     python -m flight_optimizer plan [TRIP] [--refresh]   show the booking plan
     python -m flight_optimizer done TRIP            mark a trip booked (stops alerts)
     python -m flight_optimizer test-notification    check that ntfy reaches your phone
+
+Add --fresh to any command to skip the 1-hour search cache.
 """
 
 import argparse
@@ -22,6 +24,7 @@ from flight_optimizer.notify import NtfyClient, NtfyError
 from flight_optimizer.plans import latest_plan, render_plan, save_plan
 from flight_optimizer.report import build_report
 from flight_optimizer.seats_aero import SeatsAeroClient, SeatsAeroError
+from flight_optimizer.seats_cache import CachedSeatsAero
 
 
 @dataclass
@@ -31,9 +34,13 @@ class Clients:
     ntfy: NtfyClient | None
 
 
-def default_clients(settings: Settings) -> Clients:
+def default_clients(settings: Settings, conn, fresh: bool = False) -> Clients:
+    """Real clients. Seats.aero calls go through a local cache; `fresh` skips the
+    short-lived search cache (flight details Seats.aero hasn't changed are still reused)."""
     return Clients(
-        awards=SeatsAeroClient(settings.seats_aero_api_key),
+        awards=CachedSeatsAero(
+            SeatsAeroClient(settings.seats_aero_api_key), conn, use_search_cache=not fresh
+        ),
         cash=SerpApiClient(settings.serpapi_api_key) if settings.serpapi_api_key else None,
         ntfy=NtfyClient(settings.ntfy_topic, server=settings.ntfy_server) if settings.ntfy_topic else None,
     )
@@ -45,6 +52,10 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Find and alert on affordable award options for each active trip.",
     )
     parser.add_argument("--top", type=int, default=5, help="award options to show per trip (default 5)")
+    parser.add_argument(
+        "--fresh", action="store_true",
+        help="always run new Seats.aero searches instead of reusing ones under an hour old",
+    )
     commands = parser.add_subparsers(dest="command")
 
     report = commands.add_parser("report", help="print the report (the default)")
@@ -163,7 +174,8 @@ def main(
     db.init_schema(conn)
     plans_dir = plans_dir or settings.database_path.resolve().parent / "plans"
     now = now or datetime.now()
-    clients = clients_factory(settings)
+    fresh = args.fresh or getattr(args, "refresh", False)  # a refreshed plan must be fresh
+    clients = clients_factory(settings, conn, fresh)
 
     try:
         if args.command == "done":

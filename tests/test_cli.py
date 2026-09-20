@@ -51,7 +51,7 @@ class FakeAwards:
         self.searched.append((origin, destination))
         return [r for r in TABLE.get((origin, destination), []) if start <= r.date <= end]
 
-    def trips(self, availability_id):
+    def trips(self, availability_id, version=None):
         return DETAILS[availability_id]
 
 
@@ -86,7 +86,7 @@ def run(argv, tmp_path, *, ntfy="default", awards=None):
     awards = awards or FakeAwards()
     ntfy_client = FakeNtfy() if ntfy == "default" else ntfy
     code = main(argv, env_file=None, plans_dir=tmp_path / "plans",
-                clients_factory=lambda settings: Clients(awards=awards, cash=None, ntfy=ntfy_client))
+                clients_factory=lambda settings, conn, fresh: Clients(awards=awards, cash=None, ntfy=ntfy_client))
     return code, awards, ntfy_client
 
 
@@ -270,3 +270,43 @@ def test_report_subcommand_accepts_top_too(env, capsys):
     code, _, _ = run(["report", "--top", "1"], tmp_path)
 
     assert code == 0 and "BEST AFFORDABLE OPTIONS" in capsys.readouterr().out
+
+
+def run_recording_fresh(argv, tmp_path):
+    seen = []
+
+    def factory(settings, conn, fresh):
+        seen.append(fresh)
+        return Clients(awards=FakeAwards(), cash=None, ntfy=FakeNtfy())
+
+    main(argv, env_file=None, plans_dir=tmp_path / "plans", clients_factory=factory)
+    return seen
+
+
+def test_searches_may_come_from_cache_unless_fresh_is_asked_for(env):
+    _, tmp_path = env
+
+    assert run_recording_fresh(["report"], tmp_path) == [False]
+    assert run_recording_fresh(["--fresh", "report"], tmp_path) == [True]
+    assert run_recording_fresh(["--fresh", "notify", "--dry-run"], tmp_path) == [True]
+
+
+def test_a_plan_refresh_always_searches_fresh(env):
+    _, tmp_path = env
+
+    assert run_recording_fresh(["plan", "1", "--refresh"], tmp_path) == [True]
+    assert run_recording_fresh(["plan", "1"], tmp_path) == [False]
+
+
+def test_the_default_clients_use_the_caching_wrapper(env):
+    from flight_optimizer.__main__ import default_clients
+    from flight_optimizer.config import load_settings
+    from flight_optimizer.seats_cache import CachedSeatsAero
+
+    conn, _ = env
+
+    normal = default_clients(load_settings(env_file=None), conn)
+    fresh = default_clients(load_settings(env_file=None), conn, fresh=True)
+
+    assert isinstance(normal.awards, CachedSeatsAero) and isinstance(fresh.awards, CachedSeatsAero)
+    assert normal.awards._use_search_cache is True and fresh.awards._use_search_cache is False

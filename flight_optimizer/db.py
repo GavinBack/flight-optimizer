@@ -65,6 +65,24 @@ CREATE TABLE IF NOT EXISTS cash_fare_cache (
     PRIMARY KEY (origin, destination, travel_date, cabin)
 );
 
+-- Seats.aero flight details, keyed by the search row's own UpdatedAt stamp. That stamp
+-- equals every flight entry's UpdatedAt (checked on live data), so an unchanged stamp
+-- means unchanged flights: safe to reuse with no time limit.
+CREATE TABLE IF NOT EXISTS trips_cache (
+    availability_id TEXT NOT NULL,
+    version         TEXT NOT NULL,
+    details_json    TEXT NOT NULL,
+    fetched_at      TEXT NOT NULL,
+    PRIMARY KEY (availability_id, version)
+);
+
+-- Seats.aero search results have no version stamp, so these expire on a short timer.
+CREATE TABLE IF NOT EXISTS search_cache (
+    cache_key    TEXT PRIMARY KEY,
+    results_json TEXT NOT NULL,
+    fetched_at   TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS balances (
     program    TEXT PRIMARY KEY,
     balance    INTEGER NOT NULL DEFAULT 0 CHECK (balance >= 0),
@@ -217,6 +235,51 @@ def get_cash_fares(
         " WHERE origin = ? AND destination = ? AND travel_date = ? AND cabin = ?",
         (origin.upper(), destination.upper(), travel_date.isoformat(), cabin),
     ).fetchone()
+
+
+def get_trips_cache(
+    conn: sqlite3.Connection, availability_id: str, version: str
+) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM trips_cache WHERE availability_id = ? AND version = ?",
+        (availability_id, version),
+    ).fetchone()
+
+
+def save_trips_cache(
+    conn: sqlite3.Connection, availability_id: str, version: str, details_json: str, fetched_at: str
+) -> None:
+    with conn:
+        conn.execute(
+            "INSERT INTO trips_cache (availability_id, version, details_json, fetched_at)"
+            " VALUES (?, ?, ?, ?)"
+            " ON CONFLICT(availability_id, version) DO UPDATE SET"
+            " details_json = excluded.details_json, fetched_at = excluded.fetched_at",
+            (availability_id, version, details_json, fetched_at),
+        )
+
+
+def get_search_cache(conn: sqlite3.Connection, cache_key: str) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM search_cache WHERE cache_key = ?", (cache_key,)).fetchone()
+
+
+def save_search_cache(
+    conn: sqlite3.Connection, cache_key: str, results_json: str, fetched_at: str
+) -> None:
+    with conn:
+        conn.execute(
+            "INSERT INTO search_cache (cache_key, results_json, fetched_at) VALUES (?, ?, ?)"
+            " ON CONFLICT(cache_key) DO UPDATE SET"
+            " results_json = excluded.results_json, fetched_at = excluded.fetched_at",
+            (cache_key, results_json, fetched_at),
+        )
+
+
+def prune_seats_cache(conn: sqlite3.Connection, *, trips_before: str, search_before: str) -> None:
+    """Drop entries fetched before the given UTC timestamps (ISO strings sort correctly)."""
+    with conn:
+        conn.execute("DELETE FROM trips_cache WHERE fetched_at < ?", (trips_before,))
+        conn.execute("DELETE FROM search_cache WHERE fetched_at < ?", (search_before,))
 
 
 def set_balance(conn: sqlite3.Connection, program: str, balance: int) -> None:

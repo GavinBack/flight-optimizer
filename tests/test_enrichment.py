@@ -59,7 +59,8 @@ class FakeClient:
         self.errors = errors or {}
         self.calls = []
 
-    def trips(self, availability_id):
+    def trips(self, availability_id, version=None):
+        self.versions = getattr(self, 'versions', []) + [version]
         self.calls.append(availability_id)
         if availability_id in self.errors:
             raise self.errors[availability_id]

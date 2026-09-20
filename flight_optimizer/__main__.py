@@ -5,6 +5,8 @@
     python -m flight_optimizer plan [TRIP] [--refresh]   show the booking plan
     python -m flight_optimizer done TRIP            mark a trip booked (stops alerts)
     python -m flight_optimizer test-notification    check that ntfy reaches your phone
+    python -m flight_optimizer balance [PROGRAM MILES ...]   show balances, or set them
+    python -m flight_optimizer gateways [TRIP] [--set|--add|--remove AIRPORT ...]   show or change hubs
 
 Add --fresh to any command to skip the 1-hour search cache.
 """
@@ -22,6 +24,7 @@ from flight_optimizer.cash_fares import SerpApiClient
 from flight_optimizer.config import ConfigError, Settings, load_settings
 from flight_optimizer.notify import NtfyClient, NtfyError
 from flight_optimizer.plans import latest_plan, render_plan, save_plan
+from flight_optimizer.programs import PROGRAM_NAMES, format_balances, parse_miles, resolve_program
 from flight_optimizer.report import build_report
 from flight_optimizer.seats_aero import SeatsAeroClient, SeatsAeroError
 from flight_optimizer.seats_cache import CachedSeatsAero
@@ -72,6 +75,18 @@ def _build_parser() -> argparse.ArgumentParser:
     done.add_argument("trip_id", type=int)
 
     commands.add_parser("test-notification", help="send a test message to your ntfy topic")
+
+    balance = commands.add_parser(
+        "balance", help="show your balances, or set them: balance PROGRAM MILES [PROGRAM MILES ...]"
+    )
+    balance.add_argument("pairs", nargs="*", metavar="PROGRAM MILES")
+
+    gateways = commands.add_parser("gateways", help="show or change the hub airports a trip is searched through")
+    gateways.add_argument("trip_id", nargs="?", type=int, help="omit if only one trip is active")
+    change = gateways.add_mutually_exclusive_group()
+    change.add_argument("--set", nargs="+", metavar="AIRPORT", help="replace the list")
+    change.add_argument("--add", nargs="+", metavar="AIRPORT", help="add airports")
+    change.add_argument("--remove", nargs="+", metavar="AIRPORT", help="remove airports")
     return parser
 
 
@@ -154,6 +169,76 @@ def _run_plan(conn, clients: Clients, plans_dir: Path, args, now: datetime) -> i
     return 0
 
 
+def _run_balance(conn, args) -> int:
+    """No arguments: show every balance. Otherwise set the given balances, all or nothing."""
+    if not args.pairs:
+        print(format_balances(db.get_balances(conn), db.balance_updates(conn)))
+        return 0
+    if len(args.pairs) % 2:
+        raise ValueError("Give balances as pairs: PROGRAM MILES, e.g. balance qantas 12000 delta 15000.")
+
+    changes: dict[str, int] = {}
+    for program_text, miles_text in zip(args.pairs[::2], args.pairs[1::2]):
+        program = resolve_program(program_text)
+        if program in changes:
+            raise ValueError(f"{PROGRAM_NAMES[program]} was given twice.")
+        changes[program] = parse_miles(miles_text)
+
+    before = db.get_balances(conn)
+    for program, miles in changes.items():  # everything was validated above, so this is all or nothing
+        db.set_balance(conn, program, miles)
+    for program, miles in changes.items():
+        name = PROGRAM_NAMES[program]
+        print(f"{name}: unchanged at {miles:,}" if before[program] == miles
+              else f"{name}: {before[program]:,} -> {miles:,}")
+    print("The next check will use the new balances.")
+    return 0
+
+
+def _gateway_cost(trip, gateways: list[str]) -> str:
+    directions = 2 if trip["return_date"] else 1
+    return (
+        f"Up to {directions * (1 + 2 * len(gateways))} Seats.aero searches per run before caching "
+        f"(the direct pair, plus up to {2 * directions} for each gateway)."
+    )
+
+
+def _run_gateways(conn, args) -> int:
+    trip = _pick_trip(conn, args.trip_id)
+    current = db.get_gateways(conn, trip["id"])
+    codes = [c.strip().upper() for c in (args.set or args.add or args.remove or [])]
+
+    if args.set:
+        new = list(dict.fromkeys(codes))
+    elif args.add:
+        new = current + [c for c in dict.fromkeys(codes) if c not in current]
+    elif args.remove:
+        missing = [c for c in codes if c not in current]
+        if missing:
+            raise ValueError(
+                f"{', '.join(missing)} is not a gateway for {trip['name']} "
+                f"(current: {', '.join(current) or 'none'}). Nothing was changed."
+            )
+        new = [c for c in current if c not in codes]
+    else:
+        new = None
+
+    if new is not None and sorted(new) != sorted(current):
+        db.set_gateways(conn, trip["id"], new)  # validates the airport codes
+        current = db.get_gateways(conn, trip["id"])
+        print(f"Gateways updated for {trip['name']}.")
+    elif new is not None:
+        print("No change: those are already the gateways.")
+
+    print(f"{trip['name']} (trip {trip['id']}): {trip['origin']} > {trip['destination']}")
+    print(f"Gateways: {', '.join(current) if current else 'none'}")
+    if not current:
+        print(f"No gateways: only the direct {trip['origin']} > {trip['destination']} pair is searched, "
+              "which often returns nothing for smaller airports.")
+    print(_gateway_cost(trip, current))
+    return 0
+
+
 def main(
     argv: list[str] | None = None,
     *,
@@ -175,6 +260,15 @@ def main(
     plans_dir = plans_dir or settings.database_path.resolve().parent / "plans"
     now = now or datetime.now()
     fresh = args.fresh or getattr(args, "refresh", False)  # a refreshed plan must be fresh
+
+    # Local-only commands: no API clients needed.
+    if args.command in ("balance", "gateways"):
+        try:
+            return _run_balance(conn, args) if args.command == "balance" else _run_gateways(conn, args)
+        except (ValueError, LookupError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+
     clients = clients_factory(settings, conn, fresh)
 
     try:

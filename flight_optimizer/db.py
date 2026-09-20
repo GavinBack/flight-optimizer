@@ -297,6 +297,11 @@ def set_balance(conn: sqlite3.Connection, program: str, balance: int) -> None:
         )
 
 
+def balance_updates(conn: sqlite3.Connection) -> dict[str, str]:
+    """When each balance was last set (UTC ISO). Programs never set are absent."""
+    return {row["program"]: row["updated_at"] for row in conn.execute("SELECT program, updated_at FROM balances")}
+
+
 def get_balances(conn: sqlite3.Connection) -> dict[str, int]:
     """Every tracked program, defaulting to 0 if never set."""
     balances = dict.fromkeys(PROGRAMS, 0)

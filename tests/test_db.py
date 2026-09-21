@@ -44,29 +44,13 @@ def test_trip_fields_are_normalized(conn):
     assert (row["depart_date"], row["return_date"]) == ("2026-11-01", "2026-11-10")
 
 
-def test_trip_defaults_to_business_with_no_limits(conn):
-    trip_id = new_trip(conn)
+def test_a_trip_has_no_cabin_or_price_limit_columns(conn):
+    # Every trip is priced in every cabin, and cash targets (`trip target`) replaced the price limits.
+    new_trip(conn)
 
-    row = conn.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
-    assert row["cabin"] == "business"
-    assert row["max_miles"] is None
-    assert row["max_cash_price"] is None
-
-
-def test_trip_stores_cabin_and_limits(conn):
-    trip_id = new_trip(conn, cabin="first", max_miles=80_000, max_cash_price=1500.0)
-
-    row = conn.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
-    assert (row["cabin"], row["max_miles"], row["max_cash_price"]) == ("first", 80_000, 1500.0)
-
-
-def test_trip_rejects_unknown_cabin_and_nonpositive_limits(conn):
-    with pytest.raises(ValueError):
-        new_trip(conn, cabin="steerage")
-    with pytest.raises(sqlite3.IntegrityError):
-        new_trip(conn, max_miles=0)
-    with pytest.raises(sqlite3.IntegrityError):
-        new_trip(conn, max_cash_price=-5)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(trips)")}
+    assert not columns & {"cabin", "max_miles", "max_cash_price"}
+    assert {"name", "origin", "destination", "depart_date", "return_date", "active", "flexible"} <= columns
 
 
 def test_one_way_trip_has_no_return_date(conn):
@@ -169,3 +153,99 @@ def test_deleting_a_trip_removes_its_alert_history(conn):
 def test_alert_for_missing_trip_is_rejected(conn):
     with pytest.raises(sqlite3.IntegrityError):
         db.record_alert(conn, trip_id=999, alert_type="award", dedupe_key="k")
+
+
+# --- retiring columns nothing reads ------------------------------------------------------------------------------
+
+OLD_TRIPS = """
+CREATE TABLE trips (
+    id INTEGER PRIMARY KEY, name TEXT NOT NULL, origin TEXT NOT NULL, destination TEXT NOT NULL,
+    depart_date TEXT NOT NULL, return_date TEXT, active INTEGER NOT NULL DEFAULT 0 CHECK (active IN (0, 1)),
+    cabin TEXT NOT NULL DEFAULT 'business' CHECK (cabin IN ('economy', 'premium_economy', 'business', 'first')),
+    flexible INTEGER NOT NULL DEFAULT 0 CHECK (flexible IN (0, 1)),
+    max_miles INTEGER CHECK (max_miles IS NULL OR max_miles > 0),
+    max_cash_price REAL CHECK (max_cash_price IS NULL OR max_cash_price > 0),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+INSERT INTO trips (name, origin, destination, depart_date, return_date, active, cabin, flexible, max_miles)
+VALUES ('Costa Rica', 'RNO', 'SJO', '2027-01-09', '2027-01-16', 1, 'business', 1, 90000);
+"""
+
+
+def old_database(tmp_path):
+    path = tmp_path / "trips.db"
+    old = sqlite3.connect(path)
+    old.executescript(OLD_TRIPS)
+    old.commit()
+    old.close()
+    return path
+
+
+def test_an_older_database_loses_the_retired_columns_and_keeps_its_trips(tmp_path):
+    path = old_database(tmp_path)
+    conn = db.connect(path)
+
+    db.init_schema(conn)
+
+    (row,) = conn.execute("SELECT * FROM trips").fetchall()
+    assert row["name"] == "Costa Rica" and row["active"] == 1 and row["flexible"] == 1 and row["depart_date"] == "2027-01-09"
+    assert not {"cabin", "max_miles", "max_cash_price"} & set(row.keys())
+
+
+def test_the_old_database_is_backed_up_first_with_everything_it_had(tmp_path):
+    path = old_database(tmp_path)
+    conn = db.connect(path)
+
+    db.init_schema(conn)
+
+    (backup,) = tmp_path.glob("trips-backup-*.db")
+    assert backup.name == f"trips-backup-{date.today():%Y%m%d}.db"       # a *.db name: git ignores it
+    saved = sqlite3.connect(backup).execute("SELECT cabin, max_miles FROM trips").fetchone()
+    assert saved == ("business", 90_000)
+
+
+def test_running_it_again_changes_nothing_and_keeps_the_first_backup(tmp_path):
+    path = old_database(tmp_path)
+    conn = db.connect(path)
+    db.init_schema(conn)
+    (backup,) = tmp_path.glob("trips-backup-*.db")
+    backup_bytes = backup.read_bytes()
+
+    db.init_schema(conn)
+    db.init_schema(db.connect(path))
+
+    assert list(tmp_path.glob("trips-backup-*.db")) == [backup] and backup.read_bytes() == backup_bytes
+
+
+def test_an_up_to_date_database_makes_no_backup(tmp_path):
+    conn = db.connect(tmp_path / "fresh.db")
+
+    db.init_schema(conn)
+    db.init_schema(conn)
+
+    assert list(tmp_path.glob("*backup*")) == []
+
+
+def test_an_in_memory_database_makes_no_backup_and_still_migrates(tmp_path):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(OLD_TRIPS)
+
+    db.init_schema(conn)
+
+    assert not {"cabin", "max_miles", "max_cash_price"} & {row[1] for row in conn.execute("PRAGMA table_info(trips)")}
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_other_tables_survive_the_migration(tmp_path):
+    path = old_database(tmp_path)
+    conn = db.connect(path)
+    db.init_schema(conn)
+    db.set_gateways(conn, 1, ["LAX"])
+    db.record_alert(conn, trip_id=1, alert_type="award", dedupe_key="k", miles=1)
+    db.set_balance(conn, "delta", 5)
+
+    db.init_schema(db.connect(path))
+
+    conn = db.connect(path)
+    assert db.get_gateways(conn, 1) == ["LAX"] and db.last_alert(conn, 1, "k") is not None and db.get_balances(conn)["delta"] == 5

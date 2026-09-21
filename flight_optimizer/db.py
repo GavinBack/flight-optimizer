@@ -35,14 +35,8 @@ CREATE TABLE IF NOT EXISTS trips (
     return_date TEXT,
     -- Gates the daily check and every alert for this trip. Off by default.
     active      INTEGER NOT NULL DEFAULT 0 CHECK (active IN (0, 1)),
-    -- Unused: every trip is priced in economy, premium economy and business (itineraries.EVALUATED_CABINS).
-    cabin       TEXT NOT NULL DEFAULT 'business'
-                CHECK (cabin IN ('economy', 'premium_economy', 'business', 'first')),
     -- 0 searches the exact dates; 1 also searches FLEXIBLE_WINDOW_DAYS either side of each date.
     flexible    INTEGER NOT NULL DEFAULT 0 CHECK (flexible IN (0, 1)),
-    -- NULL means no limit.
-    max_miles      INTEGER CHECK (max_miles IS NULL OR max_miles > 0),
-    max_cash_price REAL CHECK (max_cash_price IS NULL OR max_cash_price > 0),
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
@@ -157,8 +151,30 @@ def connect(path: Path | str) -> sqlite3.Connection:
     return conn
 
 
+# Columns of `trips` that nothing reads any more: the cabin (every trip is priced in every cabin) and the
+# price limits (cash targets replaced them). Dropped from databases created before that.
+RETIRED_TRIP_COLUMNS = ("cabin", "max_miles", "max_cash_price")
+
+
+def _backup_before_migration(conn: sqlite3.Connection) -> Path | None:
+    """Copy a file database next to itself (a `*.db` name, so git ignores it) before a change that cannot be
+    undone. Nothing for an in-memory database, and never overwrites an earlier backup."""
+    file = next((row["file"] for row in conn.execute("PRAGMA database_list") if row["name"] == "main"), "")
+    if not file:
+        return None
+    path = Path(file)
+    backup = path.with_name(f"{path.stem}-backup-{date.today():%Y%m%d}.db")
+    if not backup.exists():
+        target = sqlite3.connect(backup)
+        try:
+            conn.backup(target)
+        finally:
+            target.close()
+    return backup
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
-    """Create tables if missing. Safe to call on every start."""
+    """Create tables if missing and bring an older database up to date. Safe to call on every start."""
     with conn:
         conn.executescript(SCHEMA)
         # Columns added after the first release: CREATE TABLE IF NOT EXISTS leaves an old table as it was.
@@ -167,6 +183,12 @@ def init_schema(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "ALTER TABLE trips ADD COLUMN flexible INTEGER NOT NULL DEFAULT 0 CHECK (flexible IN (0, 1))"
             )
+    retired = [name for name in RETIRED_TRIP_COLUMNS if name in columns]
+    if retired:
+        _backup_before_migration(conn)
+        with conn:
+            for name in retired:
+                conn.execute(f"ALTER TABLE trips DROP COLUMN {name}")
 
 
 def add_trip(
@@ -178,20 +200,14 @@ def add_trip(
     depart_date: date,
     return_date: date | None = None,
     active: bool = False,
-    cabin: str = "business",
-    max_miles: int | None = None,
-    max_cash_price: float | None = None,
     flexible: bool = False,
 ) -> int:
-    """Save a trip. `max_miles` / `max_cash_price` of None mean no limit; `flexible` widens the
-    award search by a few days either side of each date."""
-    if cabin not in CABINS:
-        raise ValueError(f"Unknown cabin {cabin!r}; expected one of {CABINS}")
+    """Save a trip. `flexible` widens the award search by a few days either side of each date."""
     with conn:
         cur = conn.execute(
             "INSERT INTO trips (name, origin, destination, depart_date, return_date,"
-            " active, cabin, max_miles, max_cash_price, flexible)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " active, flexible)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 name,
                 origin.upper(),
@@ -199,9 +215,6 @@ def add_trip(
                 depart_date.isoformat(),
                 return_date.isoformat() if return_date else None,
                 int(active),
-                cabin,
-                max_miles,
-                max_cash_price,
                 int(flexible),
             ),
         )

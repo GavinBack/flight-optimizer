@@ -2,6 +2,17 @@
 
 Derived from `README.md`. Ordered roughly by dependency: decisions first, then accounts, then build.
 
+## Where things stand (cleaned up 2026-09-21)
+
+The core system is built and in daily use (see `CLAUDE.md` for what exists). What is actually open:
+
+- **Yours to do:** confirm the balances that read "never set" (Atmos, Flying Blue, LifeMiles, Avios, JetBlue) are really zero. Your Aeroplan account is open (balance 0, 2026-09-21). Virgin Red and Flying Club are deferred until a Virgin option is worth pursuing (section 1).
+- **First unattended run:** watch `logs/notify.log` after the next 7:00 AM run, the first with advice, failure alerts, flexible Kelowna, cash history and the shared-balances check all live.
+- **Known limits, not blockers:** award data is often stale (Seats.aero's cache); buy-miles sale alerts rarely fire because Delta, United and American sales are headline-only; award prices and availability are not stored (only cash history); trips past their dates stay active; the database has no off-machine backup; two trips use about 180 of the 250 free SerpApi searches a month.
+- **Optional, later:** the local GUI and web UI, transfer suggestions, the earn/status model (on hold until you pick a program), buy-versus-transfer comparison.
+
+Everything below is the detailed record; items marked done are done.
+
 ## 0. Decisions to make first
 
 These block design choices further down.
@@ -9,16 +20,18 @@ These block design choices further down.
 - [x] Check Seats.aero pricing and API limits: no free API. Pro ($9.99/mo, personal use) gives 1,000 calls/day. Subscribed; consider cancelling when no trip is active.
 - [x] Pick a cash-fare source: **SerpApi Google Flights** (chosen). Research done (Sept 2026): none of the three named options is usable as an individual developer. Amadeus Self-Service is reported shut down since 2026-07-17 (from two third-party articles; Amadeus's own pages would not load, so verify). Skyscanner's official API is partner-only, and Kiwi.com Tequila is invite-only. Best fit found: SerpApi's Google Flights API (free plan: 250 searches/month, 50/hour; `travel_class` supports economy and business; IATA airport codes; one-way or round trip). Fallback: Sky Scrapper on RapidAPI (unofficial, ~100 requests/month). It must return both business and economy fares and cover small airports like RNO and SJO. Quota plan: 250 a month is about 8 a day, so refresh cash prices weekly or only for the top N options, not daily.
 - [x] Notification channel: **ntfy** (chosen 2026-09-20). Alert = short summary plus an urgency line; the step-by-step plan is read in the app on the laptop (`plan`), not on the phone.
-- [ ] Pick where the scheduler runs: cloud function (Lambda / Cloudflare Workers) or a local scheduled script.
+- [x] Pick where the scheduler runs: a local launchd job on the owner's Mac (decided; see section 2).
 - [x] Pick a language and stack: Python 3.12 with a `.venv` virtual environment, SQLite for storage.
-- [ ] Decide how "good" is measured, since this drives the rules engine:
-  - [x] Cash threshold per trip and cabin (the "$X" in the README): `trip target TRIP CABIN AMOUNT` (2026-09-21). The old `trips.max_cash_price` column is unused.
-  - [x] Max miles for business class: none for now (Costa Rica trip is uncapped). Column exists (`max_miles`); NULL means no limit.
-  - [ ] N days before re-alerting on the same result
+- [x] Decide how "good" is measured, since this drives the rules engine:
+  - [x] Cash threshold per trip and cabin (the "$X" in the README): `trip target TRIP CABIN AMOUNT` (2026-09-21). The old `trips.max_cash_price` column was dropped.
+  - [x] Max miles: none. Trips are uncapped, and the `max_miles` column was dropped (2026-09-21). Whether an award is worth its miles is judged by cents per mile after taxes against the 1 cent floor.
+  - [x] N days before re-alerting on the same result: 7 (`RE_ALERT_DAYS`), unless it got cheaper.
 
 ## 1. Accounts to set up
 
 Free, no balance needed. Status column mirrors the README table.
+
+Done: Aeroplan (2026-09-21, balance 0; it is where every affordable award so far runs, and the Capital One transfer to it is now possible). Deferred by the owner: Virgin Red and Flying Club, to be opened if and when a Virgin option is worth pursuing. Open the others only if you expect to use them. None is needed for the app to run.
 
 - [ ] Avianca LifeMiles
 - [ ] British Airways Executive Club (Avios)
@@ -41,7 +54,7 @@ Free, no balance needed. Status column mirrors the README table.
   - [x] `trips` table: origin, destination, depart date, return date, `active` flag (default off)
   - [x] `balances` table: one row per program
   - [x] `alert_history` table: what was alerted, when, and at what price/availability, to prevent re-alerts
-- [ ] Manual balance entry for all 7 tracked programs (Capital One, Delta, AAdvantage, MileagePlus, Qantas, Atmos, Southwest)
+- [x] Manual balance entry: `python -m flight_optimizer balance PROGRAM MILES ...` (all programs). Capital One, Southwest, American, Delta and United are set; Atmos, Flying Blue, LifeMiles, Avios and JetBlue read 0 and show "never set": the owner should confirm those are truly zero.
 - [x] Seats.aero client: search award availability for one route and date range
 - [x] Map README programs to Seats.aero `source` ids: united=MileagePlus, american=AAdvantage, delta=SkyMiles, alaska=Atmos, qantas=Qantas, lifemiles=LifeMiles, flyingblue=Flying Blue, british=Avios. `southwest` returned zero routes, so it is likely not covered.
 - [x] Gateway searches: per-trip gateway airports (`trip_gateways`), search direct pair plus origin->hub and hub->destination, combine legs (`itineraries.py`). Costa Rica trip uses LAX, SFO, DEN, DFW.
@@ -49,13 +62,13 @@ Free, no balance needed. Status column mirrors the README table.
 - [x] Balance-aware ranking (`affordability.py`): own balance first, then Capital One transfers for verified 1:1 partners, shared Capital One pool, round trips assessed jointly.
 - [x] Capital One transfer ratios verified 2026-09-20 (Capital One's partner page and upgradedpoints agree): Aeroplan, LifeMiles, Flying Blue, Avios, Qantas, Virgin Red all 1:1; JetBlue 5:3. Virgin Atlantic and JetBlue are now in `CAPITAL_ONE_TRANSFERS`. Transfer times are not instant everywhere: almost instant (Aeroplan, LifeMiles, Flying Blue, Avios), Qantas up to 36 hours, JetBlue 2 to 5 days, Virgin about 1 business day (confirmed by the owner on Capital One's screen: the transfer goes to a Virgin Red membership number; to book Virgin Atlantic flights the plan says to also open a free Flying Club account and link it to Virgin Red). The plan and alerts now state these and warn about slow ones. Not fully confirmed: Virgin's own support pages could not be read (403), so the Virgin Red to Flying Club link rests on Capital One's listing plus secondary sources; the 1,000-mile transfer step is still an assumption (Capital One states only the minimum; one source says 100-mile steps for Virgin), which can only over-count.
 - [x] Connecting legs (marked `*`): the report now shows the stop count per leg, and multi-stop hub legs are penalized in the ranking (see the next items).
-- [ ] Apply the trip's `max_miles` / `max_cash_price` limits in ranking once their meaning is settled (total vs per program).
+- [x] Trip `max_miles` / `max_cash_price` limits: dropped as unused (2026-09-21). Cash targets (`trip target`) replaced the price limit; there is no miles cap.
 - [x] Programs outside the README list: Air Canada Aeroplan IS a Capital One transfer partner (1:1, instant), so the README's four-partner list is incomplete. Still to confirm: Virgin Atlantic (Capital One lists Virgin Red, and how that reaches Flying Club is unverified) and JetBlue. Update the README table and add `aeroplan` to the tracked programs.
 - [x] **0 seats = unbookable** (decided 2026-09-19; `itineraries.MIN_SEATS = 1`, adjustable per call via `min_seats`, e.g. 2 for two travelers). Effect on the Costa Rica report: combinations 4,148 -> 1,216, affordable 12 -> 8, best option 85,900 -> 89,900 miles. Risk: some programs report 0 on most results (Azul 100%, Aeromexico 93%, American 78%, United 15%; all others 0%), which may mean "count unknown". Revisit if American or United results look wrongly missing.
 - [x] Stale award data (older than 7 days, `itineraries.STALE_AWARD_DAYS`) is demoted in the ranking and named in the report and alert. Decision (2026-09-20): demote, not exclude.
 - [x] Hub legs with several flights: extra stops are penalized in the ranking, shown per leg in the report, and called out in the alert at 2+ stops. Decision (2026-09-20): penalize, not require nonstop. Ranking is now (self-transfers, connection class, hub-leg stops, stale legs, miles). Measured on live data, a hard filter would have left nothing: of 9 affordable options, 0 have nonstop hub legs, only 2 have all data under 7 days old, and 0 satisfy both.
   - [x] Staleness severity: resolved by the freshness rule below (2026-09-20). The stale Virgin-based options (data 20 and 31 days old) now rank behind the fresher 104,000-mile options.
-  - [ ] Virgin Atlantic options: Virgin Red IS on the owner's Capital One transfer screen (asks for a Membership #). Still to do by the owner: open Virgin Red and Flying Club accounts (free), link them, and verify the exact flights on Virgin's site before any transfer.
+  - [ ] Virgin Atlantic options: Virgin Red IS on the owner's Capital One transfer screen (asks for a Membership #). Deferred by the owner (2026-09-21, not urgent): open Virgin Red and Flying Club accounts (free), link them, and verify the exact flights on Virgin's site before any transfer, if and when a Virgin option is worth pursuing.
 - [ ] Booking links from Seats.aero pre-fill route and date but not always the cabin (the Qantas link opened `travelClass=ECO`). The plan warns about it; consider verifying cabin handling per program.
 - [ ] Enrichment only checks the leading 12 candidates per direction (max 20 lookups each), ordered by price before connections are known. For the Costa Rica trip an exhaustive check gave the identical result, but a trip with many comfortable options further down could be missed.
 - [ ] Urgency thresholds (2 seats = act today, up to 5 = a few days) are guesses. Once alert history builds up, measure how long options actually last and tune them.
@@ -87,14 +100,14 @@ Free, no balance needed. Status column mirrors the README table.
   - [x] The borderline happened (2026-09-21): the Qantas leg turned 8 days old overnight, every affordable option became stale, and the first scheduled run correctly stayed silent (`logs/notify.log`: "every one relies on award data older than 7 days"). Answer: the **weekly digest** (`digest.py`), sent by the daily run once every 7 days (the first on the next run) and on demand with `python -m flight_optimizer digest [--dry-run]`. It states, per trip, how many options exist and how many are current, aging or stale, that silence means no current data and not no options, the alerts sent in the last 7 days, the cheapest gap to close by buying (a headline-only sale is called a best case), the live sales count, and whether balances are stale. Low priority, never includes balance amounts, and the weekly timer only restarts once a digest was really sent.
   - [ ] The freshness thresholds (3 and 7 days) are judgment calls. Once alert history builds up, check how often Seats.aero refreshes routes like RNO>LAX and adjust.
 - [x] Scheduler: a launchd job (`com.gavinback.flightoptimizer.notify`, plist in `~/Library/LaunchAgents/`) runs `python -m flight_optimizer notify` daily at 7:00 AM local. Output goes to `logs/notify.log`. Verified under launchd before install: settings and database readable from `~/Documents`, network reachable, and a full `notify --dry-run` exits 0. The first real run will alert on the current best option. If the Mac is asleep at 7:00 it should run on wake (launchd behavior); if it is powered off the run is skipped.
-- [ ] Rules engine:
+- [x] Rules engine:
   - [x] Alert if a business-class award is bookable within current balance (`alerts.decide_alert`: alerts on the best affordable option)
   - [x] Alert if cash fare is below the threshold (`cash_alerts.py`: your `trip target`, plus an automatic economy drop alert once there is history)
-  - [ ] Alert if award space opens on a previously sold-out route/date
+  - [ ] Alert if award space opens on a previously sold-out route/date. In practice a newly affordable option already alerts once (`decide_alert`), so this only adds value with stored award history (not built).
   - [x] Suppress repeat alerts within N days unless price improves (`RE_ALERT_DAYS = 7`, keyed on the exact flights)
 - [x] Notification sender (`notify.py`, ntfy over JSON; errors never leak the topic).
 - [x] Confirm nothing fires for an inactive trip (tested: only `db.active_trips` are searched or alerted on; `done <trip>` stops alerts immediately).
-- [ ] End-to-end test with one real route
+- [x] End-to-end test with one real route: done repeatedly on live data (reports, dry-run notifies, a live advice call, a failure path with a wrong key), plus the daily launchd job running unattended.
 
 ## 3. Buy-miles promo alerts
 

@@ -33,7 +33,7 @@ def test_each_price_entry_is_sane(program):
     assert price.tax_rate in (0.0, 0.075)
     assert 0 < price.min_points <= 2_000 and price.step in (1_000, 2_000)
     assert price.annual_cap is None or price.annual_cap >= price.min_points
-    assert price.confidence in ("medium", "low") and price.note
+    assert price.confidence in ("high", "medium", "low") and price.note
 
 
 def test_us_carriers_carry_the_federal_excise_tax_and_the_others_do_not():
@@ -316,3 +316,12 @@ def test_plans_rank_by_their_sale_prices():
     ranked = rank_buy_plans([near_miss(16_700), near_miss(24_000)], TODAY, delta_sale)
 
     assert ranked[0].total_cost <= ranked[1].total_cost
+
+
+def test_delta_is_the_one_price_confirmed_on_the_airlines_own_page():
+    delta = RETAIL_PRICES["delta"]
+
+    assert delta.confidence == "high"
+    assert delta.cents_per_point == 3.5 and delta.annual_cap == 60_000
+    assert "24 to 48 hours" in delta.note and "final" in delta.note and "10 days old" in delta.note
+    assert [p.program for p in RETAIL_PRICES.values() if p.confidence == "high"] == ["delta"]

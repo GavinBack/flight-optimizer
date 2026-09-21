@@ -2,8 +2,9 @@
 
 Retail prices come from secondary sources read on 2026-09-20 (WalletHub, AwardWallet,
 One Mile at a Time, LoyaltyLobby, Upgraded Points, Head for Points and others). The
-programs' own pages were not read, and prices change, so every figure here is an
-ESTIMATE to check on the program's site before paying. Cross-checks that held:
+programs' own pages were not read, EXCEPT Delta's (delta.com Buy Miles page, read 2026-09-21),
+and prices change, so every figure here is an ESTIMATE to check on the program's site before
+paying. Cross-checks that held:
 
 - Delta's 2026 promo, 60,000 points for $2,257.50, is exactly 60,000 x 3.5 cents x 1.075.
 - Aeroplan's 100% bonus tier at 1.88 CAD cents is exactly half its 3.75 CAD cent base.
@@ -41,8 +42,11 @@ class RetailPrice:
 RETAIL_PRICES: dict[str, RetailPrice] = {
     p.program: p
     for p in (
-        RetailPrice("delta", 3.5, US_EXCISE_TAX, 2_000, 2_000, 60_000, "medium",
-                    "3.76 cents including tax. Block size of 2,000 is from one source."),
+        RetailPrice("delta", 3.5, US_EXCISE_TAX, 2_000, 2_000, 60_000, "high",
+                    "Price ($0.035 a mile plus tax) and the 60,000-a-year limit are confirmed on delta.com. "
+                    "Miles post in 24 to 48 hours, every purchase is final, and the account must be at least "
+                    "10 days old with a posted mile. The 2,000 block size is from one secondary source: "
+                    "delta.com does not state it."),
         RetailPrice("united", 3.5, US_EXCISE_TAX, 2_000, 1_000, 200_000, "medium",
                     "Also capped at 50,000 miles per rolling 90 days."),
         RetailPrice("american", 3.5, US_EXCISE_TAX, 2_000, 1_000, 300_000, "medium",

@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -1401,7 +1401,9 @@ def test_a_claude_failure_never_fails_the_run_or_loses_the_alerts(env, capsys):
 
     code, _, ntfy = run(["notify"], tmp_path, advisor=FakeAdvisor(error=AdvisorError("Claude returned HTTP 429: limit")))
 
-    assert code == 0 and len(ntfy.sent) == 1 and len(alert_rows(conn)) == 1
+    assert code == 0 and len(alert_rows(conn)) == 1     # the run still succeeded, and the award alert went out
+    assert [m["priority"] for m in ntfy.sent] == [4, 2]  # plus a low-priority note that the advice is degraded
+    assert "Claude advice: Claude returned HTTP 429: limit" in ntfy.sent[1]["message"]
     assert "could not get advice: Claude returned HTTP 429" in capsys.readouterr().err
 
 
@@ -1662,3 +1664,418 @@ def test_switching_to_exact_alone_counts_as_a_change(env, capsys):
     code, _, _ = run(["trip", "set", "1", "--exact"], tmp_path)
 
     assert code == 0 and "Updated." in capsys.readouterr().out
+
+
+# --- failure alerts ---------------------------------------------------------------------------------------------------
+
+class ExplodingAwards(FakeAwards):
+    def __init__(self, error, only=None):
+        super().__init__()
+        self.error, self.only = error, only
+
+    def search(self, origin, destination, start, end, **kw):
+        if self.only is None or (origin, destination) == self.only:
+            raise self.error
+        return super().search(origin, destination, start, end, **kw)
+
+
+def failures(ntfy):
+    return [m for m in ntfy.sent if m["title"].startswith("Flight check")]
+
+
+def test_a_search_failure_alerts_the_phone_and_fails_the_run(env, capsys):
+    from flight_optimizer.seats_aero import SeatsAeroRateLimitError
+    _, tmp_path = env
+
+    code, _, ntfy = run(["notify"], tmp_path, awards=ExplodingAwards(SeatsAeroRateLimitError("Daily Seats.aero call quota exhausted", 429)))
+
+    (alert,) = failures(ntfy)
+    assert code == 1 and alert["title"] == "Flight check failed" and alert["priority"] == 4
+    assert "- Costa Rica: Daily Seats.aero call quota exhausted" in alert["message"] and "logs/notify.log" in alert["message"]
+    assert "error: Costa Rica: Daily Seats.aero call quota exhausted" in capsys.readouterr().err
+
+
+def test_an_unexpected_error_is_named_by_type_only_but_logged_in_full(env, capsys):
+    _, tmp_path = env
+    secret = ValueError("boom with x-api-key: sk-secret-value")
+
+    code, _, ntfy = run(["notify"], tmp_path, awards=ExplodingAwards(secret))
+
+    (alert,) = failures(ntfy)
+    assert code == 1 and "unexpected ValueError" in alert["message"]
+    assert "sk-secret-value" not in alert["message"] and "sk-secret-value" not in alert["title"]
+    assert "Traceback" in capsys.readouterr().err        # the local log has the detail
+
+
+def test_one_trips_failure_does_not_cost_the_other_trip_its_alerts(env):
+    conn, tmp_path = env
+    trip_id = db.add_trip(conn, name="Kelowna", origin="RNO", destination="YLW", depart_date=JAN9, return_date=JAN16, active=True)
+    # Costa Rica's searches work; Kelowna's (RNO>YLW) fail.
+    awards = ExplodingAwards(RuntimeError("x"), only=("RNO", "YLW"))
+
+    code, _, ntfy = run(["notify"], tmp_path, awards=awards)
+
+    assert code == 1
+    assert any(m["title"].startswith("Costa Rica") for m in ntfy.sent)          # its award alert still went out
+    assert "- Kelowna: unexpected RuntimeError" in failures(ntfy)[0]["message"]
+
+
+def test_the_same_failure_is_not_repeated_within_a_day_but_is_the_next_day(env):
+    conn, tmp_path = env
+    boom = ExplodingAwards(RuntimeError("x"))
+    run(["notify"], tmp_path, awards=boom)
+
+    _, _, again = run(["notify"], tmp_path, awards=boom)
+    assert failures(again) == []
+
+    from flight_optimizer import failures as f
+    key = next(k for k in ("failure:" + f.build_failure_alert([f.Problem("Costa Rica", "unexpected RuntimeError")]).key,))
+    db.set_meta(conn, key, (datetime.now(timezone.utc) - timedelta(hours=21)).isoformat())
+    _, _, next_day = run(["notify"], tmp_path, awards=boom)
+    assert len(failures(next_day)) == 1
+
+
+def test_a_failed_search_does_not_send_an_empty_digest(env):
+    conn, tmp_path = env
+    make_digest_due(conn)
+
+    _, _, ntfy = run(["notify"], tmp_path, awards=ExplodingAwards(RuntimeError("x")))
+
+    assert digests(ntfy) == []
+
+
+def test_a_healthy_run_sends_no_failure_alert(env):
+    _, tmp_path = env
+
+    _, _, ntfy = run(["notify"], tmp_path)
+
+    assert failures(ntfy) == []
+
+
+def test_a_dry_run_shows_the_failure_alert_but_records_nothing(env, capsys):
+    conn, tmp_path = env
+
+    code, _, ntfy = run(["notify", "--dry-run"], tmp_path, awards=ExplodingAwards(RuntimeError("x")))
+
+    assert code == 1 and ntfy.sent == [] and "would send for Flight Optimizer: failure alert" in capsys.readouterr().out
+    assert db.get_meta(conn, "notify:last_attempt") is None
+
+
+def test_broken_cash_prices_are_reported_as_degraded_but_a_missing_key_is_not(env):
+    from flight_optimizer.cash_fares import SerpApiQuotaError
+    _, tmp_path = env
+
+    class BrokenCash:
+        searches_made = 0
+        def search(self, *a, **k):
+            raise SerpApiQuotaError("SerpApi search quota exhausted")
+
+    ntfy = FakeNtfy()
+    code = main(["notify"], env_file=None, plans_dir=tmp_path / "plans",
+                clients_factory=lambda s, c, f: Clients(awards=FakeAwards(), cash=BrokenCash(), ntfy=ntfy))
+    (alert,) = failures(ntfy)
+    assert code == 0 and alert["title"] == "Flight check: something is degraded" and alert["priority"] == 2
+    assert "Cash prices for Costa Rica: SerpApi search quota exhausted" in alert["message"]
+
+    _, _, no_key = run(["notify"], tmp_path)   # cash=None: no key set
+    assert failures(no_key) == []
+
+
+def test_an_error_outside_the_per_trip_work_still_alerts(env, monkeypatch):
+    import flight_optimizer.__main__ as cli
+    _, tmp_path = env
+    monkeypatch.setattr(cli, "active_promos", lambda *a, **k: (_ for _ in ()).throw(KeyError("boom")))
+
+    code, _, ntfy = run(["notify"], tmp_path)
+
+    (alert,) = failures(ntfy)
+    assert code == 1 and "- Daily check: unexpected KeyError" in alert["message"]
+
+
+# --- a missed run ---------------------------------------------------------------------------------------------------------
+
+def test_the_first_ever_run_is_not_a_missed_run(env):
+    _, tmp_path = env
+
+    _, _, ntfy = run(["notify"], tmp_path)
+
+    assert not any(m["title"] == "Flight check was missed" for m in ntfy.sent)
+
+
+def test_a_run_after_a_long_gap_says_it_was_missed(env):
+    conn, tmp_path = env
+    db.set_meta(conn, "notify:last_attempt", (datetime.now(timezone.utc) - timedelta(days=3, hours=1)).isoformat())
+
+    _, _, ntfy = run(["notify"], tmp_path)
+
+    (missed,) = [m for m in ntfy.sent if m["title"] == "Flight check was missed"]
+    assert "No daily check ran for about 3 days" in missed["message"] and missed["priority"] == 3
+
+
+def test_daily_runs_are_never_missed_runs(env):
+    conn, tmp_path = env
+    run(["notify"], tmp_path)
+    db.set_meta(conn, "notify:last_attempt", (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat())
+
+    _, _, ntfy = run(["notify"], tmp_path)
+
+    assert not any(m["title"] == "Flight check was missed" for m in ntfy.sent)
+
+
+def test_a_run_that_failed_still_counts_as_attempted_so_it_is_not_reported_as_missed(env):
+    conn, tmp_path = env
+    run(["notify"], tmp_path, awards=ExplodingAwards(RuntimeError("x")))
+    assert db.get_meta(conn, "notify:last_attempt") is not None
+
+    _, _, ntfy = run(["notify"], tmp_path)
+
+    assert not any(m["title"] == "Flight check was missed" for m in ntfy.sent)
+
+
+# --- trips that share balances ---------------------------------------------------------------------------------------
+
+def add_twin_trip(conn):
+    """A second trip over the same route and dates: its best option needs exactly what the first trip's does."""
+    trip_id = db.add_trip(conn, name="Kelowna", origin="RNO", destination="SJO", depart_date=JAN9, return_date=JAN16, active=True)
+    db.set_gateways(conn, trip_id, ["LAX"])
+    return trip_id
+
+
+def test_each_alert_says_what_it_leaves_the_other_trip(env):
+    conn, tmp_path = env
+    add_twin_trip(conn)     # both need 21,800 Delta miles and 50,000 through Capital One; Delta has 30,000
+
+    _, _, ntfy = run(["notify"], tmp_path)
+
+    alerts = [m for m in ntfy.sent if m["title"].endswith("71,800 miles")]
+    assert {m["title"] for m in alerts} == {"Costa Rica (business): 71,800 miles", "Kelowna (business): 71,800 miles"}
+    by_trip = {m["title"].split(" ")[0]: m["message"] for m in alerts}
+    assert "Shared miles: with this booked, nothing affordable is left for Kelowna." in by_trip["Costa"]
+    assert "Shared miles: with this booked, nothing affordable is left for Costa Rica." in by_trip["Kelowna"]
+    assert all("115" not in m["message"] and "30,000" not in m["message"] for m in alerts)   # no balances
+
+
+def test_the_plan_carries_the_same_warning(env):
+    conn, tmp_path = env
+    add_twin_trip(conn)
+
+    run(["notify"], tmp_path)
+
+    plan = next(p for p in (tmp_path / "plans").glob("1-*business*.txt"))
+    assert "OTHER TRIPS SHARE THESE MILES" in plan.read_text()
+
+
+def test_a_single_active_trip_gets_no_shared_miles_note(env):
+    _, tmp_path = env
+
+    _, _, ntfy = run(["notify"], tmp_path)
+
+    assert all("Shared miles" not in m["message"] for m in ntfy.sent)
+
+
+def test_trips_that_fit_together_get_no_warning(env):
+    conn, tmp_path = env
+    add_twin_trip(conn)
+    db.set_balance(conn, "delta", 60_000)
+    db.set_balance(conn, "capital_one", 200_000)      # room for both
+
+    _, _, ntfy = run(["notify"], tmp_path)
+
+    assert all("Shared miles" not in m["message"] for m in ntfy.sent)
+
+
+def test_the_report_has_a_shared_balances_section_for_several_trips(env, capsys):
+    conn, tmp_path = env
+    add_twin_trip(conn)
+
+    run(["report"], tmp_path)
+
+    out = capsys.readouterr().out
+    assert "SHARED BALANCES" in out and "Both by award: NOT possible" in out
+
+
+def test_the_report_for_one_trip_has_no_such_section(env, capsys):
+    _, tmp_path = env
+
+    run(["report"], tmp_path)
+
+    assert "SHARED BALANCES" not in capsys.readouterr().out
+
+
+def test_a_bug_in_the_joint_check_costs_no_alerts(env, monkeypatch):
+    import flight_optimizer.__main__ as cli
+    conn, tmp_path = env
+    add_twin_trip(conn)
+    monkeypatch.setattr(cli, "build_joint", lambda *a, **k: (_ for _ in ()).throw(KeyError("x")))
+
+    code, _, ntfy = run(["notify"], tmp_path)
+
+    assert code == 0                                                 # an extra failing is not a failed run
+    assert len([m for m in ntfy.sent if m["title"].endswith("71,800 miles")]) == 2
+    assert any("Shared-balance check" in m["message"] for m in ntfy.sent)     # but it is reported, at low priority
+
+
+# --- cash-price alerts ------------------------------------------------------------------------------------------------------
+
+class PricedCash:
+    """Cash fares by cabin, each direction half the round trip."""
+
+    def __init__(self, prices):
+        self.prices, self.searches_made = prices, 0
+
+    def search(self, origin, destination, on_date, cabin, **_):
+        from flight_optimizer.cash_fares import CashFare, CashSearch
+        self.searches_made += 1
+        half = self.prices[cabin] // 2
+        fare_ = CashFare(price=half, total_duration=600, layovers=(120,), airlines=("United",), flight_numbers=("UA 1",), cabins=("x",))
+        return CashSearch(fares=(fare_,), lowest_price=None, typical_range=None,
+                          fetched_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+
+def run_cash(argv, tmp_path, prices, *, awards=None):
+    ntfy = FakeNtfy()
+    awards = awards or FakeAwards()
+    code = main(argv, env_file=None, plans_dir=tmp_path / "plans",
+                clients_factory=lambda s, c, f: Clients(awards=awards, cash=PricedCash(prices), ntfy=ntfy))
+    return code, ntfy
+
+
+PRICES = {Cabin.ECONOMY: 700, Cabin.PREMIUM_ECONOMY: 1_200, Cabin.BUSINESS: 2_400}
+
+
+def seed_history(conn, cabin, totals):
+    for days, total in zip(range(len(totals) + 1, 1, -1), totals):
+        db.record_cash_total(conn, 1, cabin, (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ"), total)
+
+
+def cash_alerts(ntfy):
+    return [m for m in ntfy.sent if "cash fare" in m["title"]]
+
+
+def test_an_economy_drop_alerts_the_phone(env):
+    conn, tmp_path = env
+    seed_history(conn, "economy", [820, 800, 810, 830])
+
+    code, ntfy = run_cash(["notify"], tmp_path, PRICES)
+
+    (alert,) = cash_alerts(ntfy)
+    assert code == 0 and alert["title"] == "Costa Rica: economy cash fare dropped: $700"
+    assert "Typical lately: $815 (median of 4 searches" in alert["message"]
+    (row,) = [r for r in alert_rows(conn) if r["alert_type"] == "cash"]
+    assert row["cash_price"] == 700
+
+
+def test_a_run_with_no_notable_price_is_quiet_and_still_builds_history(env):
+    conn, tmp_path = env
+
+    _, ntfy = run_cash(["notify"], tmp_path, PRICES)
+
+    assert cash_alerts(ntfy) == []
+    assert {r["cabin"] for r in conn.execute("SELECT cabin FROM cash_history")} == {"economy", "premium_economy", "business"}
+
+
+def test_the_same_cash_search_is_not_history_twice_across_runs(env):
+    conn, tmp_path = env
+    run_cash(["notify"], tmp_path, PRICES)
+    run_cash(["notify"], tmp_path, PRICES)      # the second run reads the cached search: same fetch time
+
+    assert conn.execute("SELECT COUNT(*) FROM cash_history WHERE cabin = 'economy'").fetchone()[0] == 1
+
+
+def test_a_target_alerts_in_any_cabin_and_is_not_repeated(env):
+    conn, tmp_path = env
+    db.set_cash_target(conn, 1, "business", 2_500)
+
+    _, first = run_cash(["notify"], tmp_path, PRICES)
+    _, second = run_cash(["notify"], tmp_path, PRICES)
+
+    (alert,) = cash_alerts(first)
+    assert alert["title"] == "Costa Rica: business cash fare at your $2,500 target: $2,400"
+    assert cash_alerts(second) == []
+
+
+def test_a_trip_that_is_not_active_gets_no_cash_alerts(env):
+    conn, tmp_path = env
+    db.set_cash_target(conn, 1, "economy", 900)
+    db.set_trip_active(conn, 1, False)
+
+    _, ntfy = run_cash(["notify"], tmp_path, PRICES)
+
+    assert ntfy.sent == []
+
+
+def test_a_dry_run_shows_the_cash_alert_but_sends_and_records_no_alert(env, capsys):
+    conn, tmp_path = env
+    db.set_cash_target(conn, 1, "economy", 900)
+
+    _, ntfy = run_cash(["notify", "--dry-run"], tmp_path, PRICES)
+
+    assert ntfy.sent == [] and "cash-fare alert" in capsys.readouterr().out
+    assert [r for r in alert_rows(conn) if r["alert_type"] == "cash"] == []
+
+
+def test_the_digest_counts_cash_alerts(env):
+    conn, tmp_path = env
+    db.set_cash_target(conn, 1, "economy", 900)
+    make_digest_due(conn)
+
+    _, ntfy = run_cash(["notify"], tmp_path, PRICES)
+
+    line = next(l for l in digests(ntfy)[0]["message"].splitlines() if l.startswith("Alerts sent"))
+    assert line == "Alerts sent in the last 7 days: 1 award, 1 cash-fare."
+
+
+# --- the trip target command --------------------------------------------------------------------------------------------------
+
+def test_target_can_be_set_shown_and_cleared(env, capsys):
+    conn, tmp_path = env
+
+    run(["trip", "target", "1", "economy", "700"], tmp_path)
+    assert "you will be alerted when the economy cash fare is at or under $700 round trip" in capsys.readouterr().out
+    assert db.get_cash_targets(conn, 1) == {"economy": 700}
+
+    run(["trip", "target", "1"], tmp_path)
+    assert "Costa Rica: economy at or under $700 round trip" in capsys.readouterr().out
+
+    run(["trip", "target", "1", "economy", "--clear"], tmp_path)
+    assert "economy target cleared." in capsys.readouterr().out and db.get_cash_targets(conn, 1) == {}
+
+
+def test_target_with_nothing_set_says_how(env, capsys):
+    _, tmp_path = env
+
+    run(["trip", "target", "1"], tmp_path)
+
+    out = capsys.readouterr().out
+    assert "no cash targets" in out and "trip target 1 economy 700" in out
+
+
+@pytest.mark.parametrize("argv, message", [
+    (["trip", "target", "1", "economy"], "Give an amount in dollars, or --clear."),
+    (["trip", "target", "1", "economy", "0"], "more than zero"),
+    (["trip", "target", "1", "economy", "-5"], "more than zero"),
+    (["trip", "target", "99", "economy", "700"], "No trip with id 99"),
+])
+def test_bad_target_input_is_refused(env, capsys, argv, message):
+    conn, tmp_path = env
+
+    code, _, _ = run(argv, tmp_path)
+
+    assert code == 1 and message in capsys.readouterr().err and db.get_cash_targets(conn, 1) == {}
+
+
+def test_target_only_accepts_a_real_cabin(env):
+    _, tmp_path = env
+
+    with pytest.raises(SystemExit) as excinfo:
+        run(["trip", "target", "1", "first", "900"], tmp_path)
+
+    assert excinfo.value.code == 2
+
+
+def test_clearing_a_target_that_was_never_set_says_so(env, capsys):
+    _, tmp_path = env
+
+    run(["trip", "target", "1", "economy", "--clear"], tmp_path)
+
+    assert "was not set" in capsys.readouterr().out

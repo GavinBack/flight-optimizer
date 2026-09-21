@@ -19,6 +19,7 @@ Add --fresh to any command to skip the 1-hour search cache.
 import argparse
 import re
 import sys
+import traceback
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -34,9 +35,15 @@ from flight_optimizer.alerts import (
 )
 from flight_optimizer.analysis import analyze_trip_cabins
 from flight_optimizer.cabins import MILE_VALUE_CENTS, cabin_label
+from flight_optimizer.cash_alerts import decide_cash_alert, record_cash_alert_sent
 from flight_optimizer.cash_fares import SerpApiClient
 from flight_optimizer.config import ConfigError, Settings, load_settings
+from flight_optimizer.failures import (
+    Problem, decide_failure_alert, missed_run_alert, record_attempt, record_failure_sent,
+)
+from flight_optimizer.failures import describe as describe_failure
 from flight_optimizer.digest import alert_counts_for, build_digest, digest_due, record_digest_sent
+from flight_optimizer.joint import build_joint
 from flight_optimizer.itineraries import EVALUATED_CABINS, STALE_AWARD_DAYS, Freshness
 from flight_optimizer.notify import NtfyClient, NtfyError
 from flight_optimizer.plans import latest_plan, render_plan, save_plan
@@ -162,6 +169,14 @@ def _build_parser() -> argparse.ArgumentParser:
     state.add_argument("--active", action="store_true", help="search and alert on this trip")
     state.add_argument("--inactive", action="store_true", help="stop searching and alerting on this trip")
 
+    target = trip_actions.add_parser(
+        "target", help="show, set or clear the round-trip cash price you would book at (alerts when a fare reaches it)"
+    )
+    target.add_argument("trip_id", type=int)
+    target.add_argument("cabin", nargs="?", choices=["economy", "premium_economy", "business"])
+    target.add_argument("amount", nargs="?", type=float, help="dollars, round trip")
+    target.add_argument("--clear", action="store_true", help="remove the target for that cabin")
+
     balance = commands.add_parser(
         "balance", help="show your balances, or set them: balance PROGRAM MILES [PROGRAM MILES ...]"
     )
@@ -204,6 +219,18 @@ def _send(conn, clients: Clients, trip, alert, *, dry_run: bool, describe: str) 
     return True
 
 
+_SYSTEM = {"name": "Flight Optimizer"}  # who a tool-level notice is "for" when there is no trip
+
+
+def _problem_from(where: str, exc: Exception, *, severe: bool = True) -> Problem:
+    """A Problem for the failure alert, logging what happened. An unexpected error gets its traceback in the log."""
+    text = describe_failure(exc)
+    print(f"error: {where}: {text}", file=sys.stderr)
+    if text.startswith("unexpected "):
+        traceback.print_exception(exc, file=sys.stderr)
+    return Problem(where, text, severe)
+
+
 def _run_notify(
     conn, clients: Clients, plans_dir: Path, *, dry_run: bool, now: datetime, advice: bool = True
 ) -> int:
@@ -215,6 +242,13 @@ def _run_notify(
         print("error: NTFY_TOPIC is not set. Add it to .env (see .env.example).", file=sys.stderr)
         return 1
 
+    # Note this attempt before doing anything, so a run that crashes still counts as having run.
+    missed = missed_run_alert(conn, now=now)
+    if not dry_run:
+        record_attempt(conn, now=now)
+    if missed is not None:
+        _send(conn, clients, _SYSTEM, missed, dry_run=dry_run, describe="missed-run notice")
+
     if clients.promos is not None:
         refreshed = refresh_promos(conn, clients.promos, now)
         for problem in refreshed.errors:
@@ -222,48 +256,98 @@ def _run_notify(
     live_promos = best_promos(active_promos(conn, now.date()))
 
     balances = db.get_balances(conn)
-    failed = False
-    analyses, by_trip = [], []
+    problems: list[Problem] = []
+    by_trip: list[list] = []
     for trip in trips:
-        trip_analyses = analyze_trip_cabins(conn, clients.awards, clients.cash, trip, balances)
-        analyses += trip_analyses
+        try:
+            trip_analyses = analyze_trip_cabins(conn, clients.awards, clients.cash, trip, balances)
+        except Exception as exc:  # one trip's failure must not cost the others their alerts
+            problems.append(_problem_from(trip["name"], exc))
+            continue
         by_trip.append(trip_analyses)
+        cash_note = next((a.cash_note for a in trip_analyses if (a.cash_note or "").startswith("Cash prices unavailable")), None)
+        if cash_note:  # a key that is simply not set is a choice; a search that failed is a problem
+            problems.append(Problem(f"Cash prices for {trip['name']}", cash_note.removeprefix("Cash prices unavailable: "), severe=False))
+    analyses = [a for group in by_trip for a in group]
 
-        for analysis in trip_analyses:
-            failed |= _alerts_for(
-                conn, clients, plans_dir, analysis, live_promos, balances, now, dry_run=dry_run
-            )
+    joint = None
+    if len(by_trip) > 1:  # the trips share balances, so alerts should say what one leaves the other
+        try:
+            joint = build_joint(by_trip, balances, now.date())
+        except Exception as exc:  # an extra: never at the cost of the alerts themselves
+            problems.append(_problem_from("Shared-balance check", exc, severe=False))
 
-        upgrade_alert = decide_upgrade_alert(conn, trip_analyses, now=now)
-        if upgrade_alert is not None:
-            if _send(conn, clients, trip, upgrade_alert, dry_run=dry_run, describe="better-cabin alert"):
-                if not dry_run:
-                    record_upgrade_sent(conn, upgrade_alert)
-                    print(f"{trip['name']}: better-cabin alert sent ({upgrade_alert.title}).")
-            else:
-                failed = True
+    failed = False
+    for trip_analyses in by_trip:
+        trip = trip_analyses[0].trip
+        try:
+            for analysis in trip_analyses:
+                failed |= _alerts_for(
+                    conn, clients, plans_dir, analysis, live_promos, balances, now, dry_run=dry_run, joint=joint
+                )
+            for analysis in trip_analyses:
+                cash_alert = decide_cash_alert(conn, analysis, now=now)
+                if cash_alert is not None:
+                    if _send(conn, clients, trip, cash_alert, dry_run=dry_run, describe="cash-fare alert"):
+                        if not dry_run:
+                            record_cash_alert_sent(conn, cash_alert)
+                            print(f"{trip['name']}: cash-fare alert sent ({cash_alert.title}).")
+                    else:
+                        failed = True
+            upgrade_alert = decide_upgrade_alert(conn, trip_analyses, now=now)
+            if upgrade_alert is not None:
+                if _send(conn, clients, trip, upgrade_alert, dry_run=dry_run, describe="better-cabin alert"):
+                    if not dry_run:
+                        record_upgrade_sent(conn, upgrade_alert)
+                        print(f"{trip['name']}: better-cabin alert sent ({upgrade_alert.title}).")
+                else:
+                    failed = True
+        except Exception as exc:
+            problems.append(_problem_from(trip["name"], exc))
 
     advice_dir = plans_dir.parent / "advice"
-    if advice:  # before the digest, so the digest can point at today's answer
-        _advise_after_checks(conn, clients, by_trip, balances, live_promos, now, advice_dir, dry_run=dry_run)
-    if digest_due(conn, now) and not _send_digest(
+    if advice and by_trip:  # before the digest, so the digest can point at today's answer
+        problem = _advise_after_checks(conn, clients, by_trip, balances, live_promos, now, advice_dir, dry_run=dry_run)
+        if problem is not None:
+            problems.append(problem)
+    if analyses and digest_due(conn, now) and not _send_digest(
         conn, clients, analyses, live_promos, balances, now, advice_dir, dry_run=dry_run
     ):
         failed = True
-    return 1 if failed else 0
+
+    alert = decide_failure_alert(conn, problems, now=now)
+    if alert is not None and _send(conn, clients, _SYSTEM, alert, dry_run=dry_run, describe="failure alert"):
+        if not dry_run:
+            record_failure_sent(conn, alert, now=now)
+            print(f"Failure alert sent: {alert.title}")
+    return 1 if failed or any(p.severe for p in problems) else 0
+
+
+def _run_notify_guarded(conn, clients: Clients, plans_dir: Path, *, dry_run: bool, now: datetime, advice: bool) -> int:
+    """`_run_notify`, and if something outside the per-trip work breaks, still tell the owner."""
+    try:
+        return _run_notify(conn, clients, plans_dir, dry_run=dry_run, now=now, advice=advice)
+    except Exception as exc:
+        problem = _problem_from("Daily check", exc)
+        alert = decide_failure_alert(conn, [problem], now=now)
+        if alert is not None and (dry_run or clients.ntfy is not None):
+            if _send(conn, clients, _SYSTEM, alert, dry_run=dry_run, describe="failure alert") and not dry_run:
+                record_failure_sent(conn, alert, now=now)
+        return 1
 
 
 _ADVICE_FINGERPRINT = "advice:fingerprint"
 
 
-def _advise_after_checks(conn, clients: Clients, by_trip, balances, live_promos, now: datetime, advice_dir: Path, *, dry_run: bool) -> None:
+def _advise_after_checks(conn, clients: Clients, by_trip, balances, live_promos, now: datetime, advice_dir: Path, *, dry_run: bool) -> Problem | None:
     """Ask Claude to weigh what this run gathered, and keep the answer for the laptop. It reuses the
     analyses already computed (no extra Seats.aero or SerpApi calls), and is skipped when nothing the
     advice depends on has changed since the last answer (see `advisor.fingerprint`). It never fails the
-    run: the alerts have already gone out, and it is kept off the phone because it discusses balances."""
+    run: the alerts have already gone out, and it is kept off the phone because it discusses balances.
+    Returns a (non-severe) Problem if Claude could not be reached, for the failure alert."""
     if clients.advisor is None:
         print("Advice: skipped, ANTHROPIC_API_KEY is not set.")
-        return
+        return None
     state = fingerprint(by_trip, balances, live_promos, model=clients.advisor.model, today=now.date())
     last = latest_advice(advice_dir)
     if last is not None and db.get_meta(conn, _ADVICE_FINGERPRINT) == state:
@@ -271,26 +355,30 @@ def _advise_after_checks(conn, clients: Clients, by_trip, balances, live_promos,
             f"Advice: {'would be ' if dry_run else ''}skipped, nothing has changed since the last answer "
             f"({advice_date(last):%b %d}). Read it with: python -m flight_optimizer advise --last"
         )
-        return
+        return None
     if dry_run:
         print("Advice: would ask Claude (a paid call). A real run does; `advise --dry-run` shows what would be sent.")
-        return
+        return None
     try:
         answer = clients.advisor.advise(build_brief(by_trip, balances, promos=live_promos, today=now.date()))
     except AdvisorError as exc:
         print(f"note: could not get advice: {exc}", file=sys.stderr)
-        return
+        return Problem("Claude advice", str(exc)[:200], severe=False)
     path = save_advice(answer, generated_at=now, directory=advice_dir)
     db.set_meta(conn, _ADVICE_FINGERPRINT, state)
     print(f"Advice saved to {path} ({answer.input_tokens:,} tokens in, {answer.output_tokens:,} out). Read it with: python -m flight_optimizer advise --last")
+    return None
 
 
-def _alerts_for(conn, clients: Clients, plans_dir: Path, analysis, live_promos, balances, now: datetime, *, dry_run: bool) -> bool:
+def _alerts_for(
+    conn, clients: Clients, plans_dir: Path, analysis, live_promos, balances, now: datetime, *, dry_run: bool, joint=None
+) -> bool:
     """Award and sale alerts for one trip in one cabin. True if any could not be delivered."""
     trip, failed = analysis.trip, False
     label = f"{trip['name']} ({cabin_label(analysis.cabin)})"
 
-    alert = decide_alert(conn, analysis, now=now)
+    notes_for = (lambda option: joint.notes_for(trip["id"], option)) if joint is not None else None
+    alert = decide_alert(conn, analysis, now=now, notes_for=notes_for)
     if alert is None:
         current = [o for o in analysis.affordable if o.freshness(now.date()) is not Freshness.STALE]
         if analysis.affordable and not current:
@@ -309,7 +397,9 @@ def _alerts_for(conn, clients: Clients, plans_dir: Path, analysis, live_promos, 
         _send(conn, clients, trip, alert, dry_run=True, describe="award alert")
     else:
         # Save the plan first, so the alert's "full steps" pointer is always valid.
-        plan_text = render_plan(analysis, alert.option, balances=balances, generated_at=now, urgency=alert.urgency)
+        plan_text = render_plan(
+            analysis, alert.option, balances=balances, generated_at=now, urgency=alert.urgency, notes=alert.notes
+        )
         path = save_plan(plan_text, trip, generated_at=now, cabin=analysis.cabin, directory=plans_dir)
         if _send(conn, clients, trip, alert, dry_run=False, describe="award alert"):
             record_sent(conn, alert, str(path))
@@ -440,6 +530,27 @@ def _run_plan(conn, clients: Clients, plans_dir: Path, args, now: datetime) -> i
     return 0
 
 
+def _run_trip_target(conn, args) -> int:
+    trip = _pick_trip(conn, args.trip_id)
+    if args.cabin is None:
+        targets = db.get_cash_targets(conn, trip["id"])
+        if not targets:
+            print(f"{trip['name']}: no cash targets. Set one with: python -m flight_optimizer trip target {trip['id']} economy 700")
+        for cabin, price in targets.items():
+            print(f"{trip['name']}: {cabin.replace('_', ' ')} at or under ${price:,} round trip")
+        return 0
+    if args.clear:
+        removed = db.clear_cash_target(conn, trip["id"], args.cabin)
+        print(f"{trip['name']}: {args.cabin.replace('_', ' ')} target " + ("cleared." if removed else "was not set."))
+        return 0
+    if args.amount is None:
+        raise ValueError("Give an amount in dollars, or --clear.")
+    db.set_cash_target(conn, trip["id"], args.cabin, round(args.amount))
+    print(f"{trip['name']}: you will be alerted when the {args.cabin.replace('_', ' ')} cash fare is at or under "
+          f"${round(args.amount):,} round trip (the fare for your exact dates).")
+    return 0
+
+
 def _run_trip(conn, args) -> int:
     action = getattr(args, "trip_action", None)
     if action in (None, "list"):
@@ -469,6 +580,9 @@ def _run_trip(conn, args) -> int:
         print("Evaluate it with: python -m flight_optimizer report" if trip["active"]
               else f"Saved inactive. Start searching it with: python -m flight_optimizer trip set {trip_id} --active")
         return 0
+
+    if action == "target":
+        return _run_trip_target(conn, args)
 
     trip = _pick_trip(conn, args.trip_id)
     active = True if args.active else False if args.inactive else None
@@ -696,7 +810,7 @@ def main(
                 print(f"error: {exc}", file=sys.stderr)
                 return 1
         if args.command == "notify":
-            return _run_notify(conn, clients, plans_dir, dry_run=args.dry_run, now=now, advice=not args.no_advice)
+            return _run_notify_guarded(conn, clients, plans_dir, dry_run=args.dry_run, now=now, advice=not args.no_advice)
         if args.command == "plan":
             return _run_plan(conn, clients, plans_dir, args, now)
         if args.command == "advise":

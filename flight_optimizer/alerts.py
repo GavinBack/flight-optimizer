@@ -46,6 +46,7 @@ class Alert:
     click: str | None  # opens when the notification is tapped
     priority: int
     tags: tuple[str, ...]
+    notes: tuple[str, ...] = ()  # what booking this leaves the other trips (no balances)
 
 
 def option_legs(option: TripOption):
@@ -137,7 +138,9 @@ def _changed_legs(option: TripOption, other: TripOption) -> list[str]:
     ]
 
 
-def build_alert(analysis: TripAnalysis, option: TripOption, *, fallback: TripOption | None) -> Alert:
+def build_alert(
+    analysis: TripAnalysis, option: TripOption, *, fallback: TripOption | None, notes: tuple[str, ...] = ()
+) -> Alert:
     trip = analysis.trip
     cabin = cabin_label(analysis.cabin)
     urgency = assess_urgency(option)
@@ -163,9 +166,10 @@ def build_alert(analysis: TripAnalysis, option: TripOption, *, fallback: TripOpt
         lines.append(f"If it goes: next best is {fallback.total_miles:,} miles ({extra:+,}){detail}")
     else:
         lines.append("If it goes: no other affordable option right now")
-    notes = heads_up(option)
-    if notes:
-        lines.append("Note: " + "; ".join(notes))
+    warnings = heads_up(option)
+    if warnings:
+        lines.append("Note: " + "; ".join(warnings))
+    lines.extend(notes)
     oldest = oldest_data(option)
     lines.append(
         (f"Data as of {oldest}. " if oldest else "")
@@ -183,6 +187,7 @@ def build_alert(analysis: TripAnalysis, option: TripOption, *, fallback: TripOpt
         click=click,
         priority=urgency.priority,
         tags=("airplane",) + (("warning",) if urgency.priority >= 4 else ()),
+        notes=notes,
     )
 
 
@@ -210,7 +215,7 @@ def usable_for_alert(analysis: TripAnalysis, today: date) -> list[TripOption]:
 
 
 def decide_alert(
-    conn: sqlite3.Connection, analysis: TripAnalysis, *, now: datetime | None = None
+    conn: sqlite3.Connection, analysis: TripAnalysis, *, now: datetime | None = None, notes_for=None
 ) -> Alert | None:
     """An alert for the trip's best affordable option with current-enough data, or None.
 
@@ -233,7 +238,8 @@ def decide_alert(
             return None
 
     fallback = next((o for o in affordable[1:] if option_key(o) != key), None)
-    return build_alert(analysis, best, fallback=fallback)
+    notes = tuple(notes_for(best)) if notes_for is not None else ()  # e.g. what this leaves the other trips
+    return build_alert(analysis, best, fallback=fallback, notes=notes)
 
 
 def record_sent(conn: sqlite3.Connection, alert: Alert, plan_path: str | None = None) -> None:

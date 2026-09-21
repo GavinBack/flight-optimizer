@@ -51,6 +51,7 @@ def render_plan(
     balances: dict[str, int],
     generated_at: datetime,
     urgency: Urgency | None = None,
+    notes: tuple[str, ...] = (),
 ) -> str:
     trip = analysis.trip
     urgency = urgency or assess_urgency(option)
@@ -182,6 +183,9 @@ def render_plan(
                 if analysis.cabin is not Cabin.ECONOMY and baseline.economy_total is not None else ""
             ),
         ]
+
+    if notes:
+        out += ["", "OTHER TRIPS SHARE THESE MILES"] + [f"  {note}" for note in notes]
 
     out += [
         "",

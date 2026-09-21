@@ -9,6 +9,7 @@ from flight_optimizer.analysis import TripAnalysis, analyze_trip_cabins
 from flight_optimizer.cabins import (
     MILE_VALUE_CENTS, UPGRADE_MAX_MULTIPLE, CabinComparison, cabin_label, compare_cabins,
 )
+from flight_optimizer.cashtrend import CashTrend
 from flight_optimizer.buying import ESTIMATE_NOTE, BuyPlan, Purchase, rank_buy_plans
 from flight_optimizer.cash_fares import (
     DEFAULT_MAX_CACHE_AGE,
@@ -19,6 +20,7 @@ from flight_optimizer.cash_fares import (
 )
 from flight_optimizer.connections import COMFORTABLE_CONNECTION_MINUTES, MIN_CONNECTION_MINUTES, ConnectionClass
 from flight_optimizer.enrichment import EnrichmentStats
+from flight_optimizer.joint import JOINT_TOP, JointView, build_joint
 from flight_optimizer.itineraries import (
     CURRENT_AWARD_DAYS, STALE_AWARD_DAYS, Freshness, Itinerary, is_stale,
 )
@@ -395,6 +397,8 @@ def render_trip(
     cash_note: str | None = None,
     stats: EnrichmentStats | None = None,
     cabin: Cabin = Cabin.BUSINESS,
+    cash_trend: CashTrend | None = None,
+    cash_target: int | None = None,
     top_n: int = 5,
     near_n: int = 3,
     buy_n: int = 3,
@@ -433,6 +437,18 @@ def render_trip(
             out.append(f"  {cabin_name} costs ${baseline.cabin_total - baseline.economy_total:,} more than economy")
         if baseline.fetched_at:
             out.append(f"  fares fetched {baseline.fetched_at[:10]} (refreshed once older than {DEFAULT_MAX_CACHE_AGE.days} days)")
+        if cash_trend is not None:
+            if cash_trend.count:
+                since = f" since {cash_trend.first_seen:%b %d}" if cash_trend.first_seen else ""
+                out.append(
+                    f"  {cabin_name} cash history: {cash_trend.count} earlier search{'es' if cash_trend.count != 1 else ''}{since}, "
+                    f"low ${cash_trend.low:,}, typical ${cash_trend.typical:,}"
+                )
+            else:
+                out.append(f"  {cabin_name} cash history: this is the first search kept, so there is nothing to compare with yet")
+        if cash_target is not None:
+            state = "reached" if baseline.cabin_total is not None and baseline.cabin_total <= cash_target else "not reached"
+            out.append(f"  your {cabin_name} target: ${cash_target:,} ({state})")
 
     affordable = [o for o in ranked if o.affordability.affordable]
     misses = [o for o in ranked if not o.affordability.affordable]
@@ -484,6 +500,48 @@ def render_trip(
     return "\n".join(out)
 
 
+def render_joint(view: JointView) -> str:
+    """Trips compared with each other on the shared balances (see `joint.py`)."""
+    out = [RULE, "SHARED BALANCES   the trips are checked against each other", RULE, ""]
+    for pair in view.pairs:
+        first, second = pair.first["name"], pair.second["name"]
+        out.append(f"{first} and {second}")
+        if not pair.competing:
+            who = [t["name"] for t, c in ((pair.first, pair.first_candidates), (pair.second, pair.second_candidates)) if c]
+            out.append(
+                f"  No competition: only {who[0]} has an affordable award right now." if who
+                else "  No competition: neither has an affordable award right now."
+            )
+            out.append("")
+            continue
+        if pair.best is not None:
+            a, b = pair.best.first, pair.best.second
+            out.append(
+                f"  Both by award: possible. Cheapest pair: {first} {cabin_label(a.cabin)} {a.option.total_miles:,} miles"
+                f" + {second} {cabin_label(b.cabin)} {b.option.total_miles:,} miles = {pair.best.total_miles:,} miles."
+            )
+            used = pair.best.affordability.capital_one_used
+            if used:
+                out.append(f"  That pair moves {used:,} Capital One miles in all.")
+        else:
+            out.append(
+                "  Both by award: NOT possible. Each trip has an affordable option, but no pair of them is affordable "
+                "together. Choose which trip gets awards, or buy miles for the other."
+            )
+        for n in pair.narrowings:
+            kept = "nothing affordable" if not n.kept else f"only {' and '.join(cabin_label(c) for c in n.kept)} stay affordable"
+            out.append(
+                f"  {n.candidate.trip['name']} {cabin_label(n.candidate.cabin)} (leading option, "
+                f"{n.candidate.option.total_miles:,} miles) leaves {n.other['name']}: {kept}."
+            )
+        out.append("")
+    out.append(
+        f"  Checked pair by pair, on the leading affordable options in each cabin (up to {JOINT_TOP} each) whose data is not "
+        "stale and whose miles beat cash."
+    )
+    return "\n".join(out)
+
+
 def render_trip_sections(
     analyses: list[TripAnalysis],
     balances: dict[str, int],
@@ -502,6 +560,7 @@ def render_trip_sections(
             render_trip(
                 analysis.trip, analysis.gateways, analysis.ranked, analysis.baseline, balances,
                 cash_note=analysis.cash_note, stats=analysis.stats, cabin=analysis.cabin,
+                cash_trend=analysis.cash_trend, cash_target=analysis.cash_target,
                 top_n=top_n, near_n=near_n, buy_n=buy_n, promos=promos, today=today,
             )
         )
@@ -524,12 +583,15 @@ def build_report(
 
     balances = db.get_balances(conn)
     live_promos = best_promos(active_promos(conn, today or date.today()))
-    sections = []
+    sections, groups = [], []
     for trip in trips:
         analyses = analyze_trip_cabins(conn, awards, cash, trip, balances)
+        groups.append(analyses)
         sections += render_trip_sections(
             analyses, balances, promos=live_promos, today=today, top_n=top_n, near_n=near_n
         )
+    if len(groups) > 1:
+        sections.append(render_joint(build_joint(groups, balances, today or date.today())))
 
     usage = []
     if awards.calls_remaining is not None:

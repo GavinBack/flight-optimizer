@@ -12,7 +12,7 @@ These block design choices further down.
 - [ ] Pick where the scheduler runs: cloud function (Lambda / Cloudflare Workers) or a local scheduled script.
 - [x] Pick a language and stack: Python 3.12 with a `.venv` virtual environment, SQLite for storage.
 - [ ] Decide how "good" is measured, since this drives the rules engine:
-  - [ ] Cash threshold per trip (the "$X" in the README). Costa Rica trip has none set; column exists (`max_cash_price`).
+  - [x] Cash threshold per trip and cabin (the "$X" in the README): `trip target TRIP CABIN AMOUNT` (2026-09-21). The old `trips.max_cash_price` column is unused.
   - [x] Max miles for business class: none for now (Costa Rica trip is uncapped). Column exists (`max_miles`); NULL means no limit.
   - [ ] N days before re-alerting on the same result
 
@@ -87,7 +87,7 @@ Free, no balance needed. Status column mirrors the README table.
 - [x] Scheduler: a launchd job (`com.gavinback.flightoptimizer.notify`, plist in `~/Library/LaunchAgents/`) runs `python -m flight_optimizer notify` daily at 7:00 AM local. Output goes to `logs/notify.log`. Verified under launchd before install: settings and database readable from `~/Documents`, network reachable, and a full `notify --dry-run` exits 0. The first real run will alert on the current best option. If the Mac is asleep at 7:00 it should run on wake (launchd behavior); if it is powered off the run is skipped.
 - [ ] Rules engine:
   - [x] Alert if a business-class award is bookable within current balance (`alerts.decide_alert`: alerts on the best affordable option)
-  - [ ] Alert if cash fare is below the threshold
+  - [x] Alert if cash fare is below the threshold (`cash_alerts.py`: your `trip target`, plus an automatic economy drop alert once there is history)
   - [ ] Alert if award space opens on a previously sold-out route/date
   - [x] Suppress repeat alerts within N days unless price improves (`RE_ALERT_DAYS = 7`, keyed on the exact flights)
 - [x] Notification sender (`notify.py`, ntfy over JSON; errors never leak the topic).
@@ -122,6 +122,8 @@ Separate alert type. It depends on at least one active trip.
 
 ## 4. v2: multiple trips and price history
 
+- [x] **Failure alerts** (2026-09-21, `failures.py`): a broken run now sends a `Flight check ...` ntfy message instead of only writing to the log, one trip's failure no longer costs the others their alerts, and a run that starts over 36 hours after the last says the check was missed. Not covered: a Mac that stays off cannot report itself (the next run does), and a launchd job that never loads.
+
 - [x] Multiple saved trips (2026-09-21): `python -m flight_optimizer trip [list|add|set]` adds, lists and changes trips (validated: airport codes, dates, gateways, and duplicate routes are refused). The report, daily check and digest already loop over every active trip. Commands that need one trip ask which (`Say which trip: 1 (Costa Rica), 2 (Kelowna)`). Trip 2 added: Kelowna, RNO > YLW, Dec 22 to Dec 28 2026, gateways SEA, LAX, PHX.
 - [x] **Every trip is evaluated in economy, premium economy and business** (2026-09-21, owner's rule; the per-trip `--cabin` option is gone). Goals: 1. the best price and options for each trip; 2. notice when a better cabin becomes viable on cost. Built: one shared Seats.aero search per trip (no extra calls), per-cabin analysis, a "cabins at a glance" report section, per-cabin alerts and plans, a better-cabin alert for close cash fares, and a digest line. See CLAUDE.md for the design.
   - [x] Mile value (`MILE_VALUE_CENTS`, 1.0) and upgrade multiple (`UPGRADE_MAX_MULTIPLE`, 1.5) accepted by the owner, 2026-09-21.
@@ -129,8 +131,8 @@ Separate alert type. It depends on at least one active trip.
   - [ ] Capital One is a flexibility reserve (e.g. an urgent UK trip). When joint evaluation is built, consider showing how much of the pool an option leaves untouched.
   - [ ] Premium economy is thin: no premium economy award space was found through LAX for either trip, and Google returned no premium economy cash fares for RNO to SJO. Worth checking whether that changes closer to the dates.
   - [ ] SerpApi budget: three cabins take a round-trip trip to about 90 searches a month, so two trips use about 180 of the 250 free. A third trip would exceed it: lengthen the cache age or drop premium economy cash searches for it.
-- [ ] Store historical price and availability snapshots
-- [ ] Use history to tune thresholds. The README notes dynamic award pricing means thresholds need periodic re-tuning.
+- [ ] Store historical price and availability snapshots. Started for cash: `cash_history` keeps each trip and cabin's round-trip cash total per fresh search (2026-09-21). Award availability and prices are still not stored, which also blocks an "award space opened" alert.
+- [ ] Cash history is used for the economy drop alert (10% and $50 under the median, at least 3 earlier searches). Use history to tune thresholds. The README notes dynamic award pricing means thresholds need periodic re-tuning.
 
 ## 5. v3: web UI
 
@@ -155,16 +157,17 @@ Nice-to-haves once the core alerting works. Item 7.3 overlaps with section 5 (v3
   - [x] The weekly digest ends with a one-line pointer to the latest advice (never its content). Advice is skipped when nothing has changed since the last answer (`advisor.fingerprint`: trips, balances, sales, and per cabin the cash fares in $50 steps and the leading options' miles, affordability and freshness tier). The daily cost is now about 10 cents only on days something moved.
   - [ ] The fingerprint has no maximum age: if nothing changes for weeks the old answer stands. Add a refresh after N days if that matters.
   - [ ] Not done: advice is not saved or compared between runs.
-- [ ] **Two trips at a time.** Started: each active trip is now evaluated on its own against the SAME balances. NOT done: nothing yet checks the trips against each other, so both could be recommended options that together need more Capital One miles than exist (Costa Rica's best already moves 79,000 of the 115,519).
+- [x] **Two trips at a time** (2026-09-21): each trip is analyzed alone, then `joint.py` checks them against each other on the shared balances. Findings so far: only Costa Rica has an affordable award, so there is no competition today.
   - Kelowna finding (2026-09-21): no direct RNO-YLW award route exists; SEA, LAX and PHX connect both ends. **Zero affordable award options.** The space is almost all Alaska, which needs Atmos points you do not have and Capital One cannot supply; the cheapest gaps to close are thousands of dollars (a 1-hour hop at 27,500 to 35,000 miles a leg). The cash through-ticket is the realistic option ($1,067 economy, $1,809 business, holiday fares). Economy awards are cheap in miles (RNO>SEA from 5,000) but roughly 70,000 Atmos points for the round trip would cost far more to buy than the cash fare (rough, from retail estimates).
   - [x] Flexible travel windows (2026-09-21): `trip add --flexible` / `trip set --flexible|--exact`; default is exact dates. Flexible searches awards 3 days either side of both the outbound and return dates (`windows.py`). Neither current trip is flexible yet: the Kelowna dates were given as approximate ("~"), so `trip set 2 --flexible` is the one to try.
   - [ ] Cash fares are still for the exact dates only (the SerpApi free plan cannot afford 7 dates x 2 directions x 3 cabins per trip). If flexible trips matter, price a few sample dates, or use a date-grid source, or move to a paid plan.
   - [ ] A flexible trip has no minimum or maximum trip length: outbound and return move independently (only a return before the outbound is refused).
-  - [ ] Joint evaluation: rank pairs of options (one per trip) against the shared balances, and warn when each trip's best option is affordable alone but the two together are not. `affordability.assess` already takes several itineraries.
-  - [ ] Share balances across trips: the same Capital One pool and per-program balances must cover both. `affordability.assess` already takes several itineraries, so extend it to pairs of trip options.
-  - [ ] Choose the objective: fewest total miles, most total savings, or least cash spent.
-  - [ ] Prune to the top K options per trip before combining, since 4,000+ options per trip multiplies out quickly.
-  - [ ] Surface conflicts and trade-offs, e.g. spending Aeroplan miles on trip A leaves trip B short.
+  - [x] Joint evaluation: pairs of options (one per trip) are assessed together on the shared balances; a `SHARED BALANCES` report section, digest line, alert and plan notes, and the advisor all use it.
+  - [x] Balances are shared across trips (one pool, one set of program balances).
+  - [ ] Choose the objective: fewest total miles, most total savings, or least cash spent. Today the report shows the cheapest pair by total miles and leaves the choice to you.
+  - [x] Pruned to the leading 5 alert-worthy options per cabin per trip before pairing.
+  - [x] Conflicts are surfaced ("with this booked, nothing affordable is left for Kelowna").
+  - [ ] Not done: it compares pairs of trips only (three or more trips are checked pair by pair, not all together), only awards that would themselves alert, and it does not say which trip should get the miles.
 - [ ] **Locally hosted GUI** for all of the above: trips and the `active` toggle, balances, ranked options with cash price, savings and cents per mile, and Claude's recommendation. Pick a framework (e.g. Streamlit, Flask or FastAPI). Bind to `127.0.0.1` only, since it shows balances and sits next to API keys.
 
 ## Notes

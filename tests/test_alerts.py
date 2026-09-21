@@ -605,3 +605,37 @@ def test_an_alert_on_the_asked_for_dates_does_not_mention_them_twice(conn):
 def test_the_same_flights_on_different_days_are_different_alerts():
     from datetime import date
     assert option_key(shifted(date(2027, 1, 7), date(2027, 1, 14))) != option_key(shifted(JAN9, JAN16))
+
+
+# --- notes about the other trips ------------------------------------------------------------------------------------
+
+def test_notes_from_the_joint_check_are_added_to_the_alert_and_kept_on_it(conn):
+    trip = add_trip(conn)
+    analysis = analysis_for(trip, [good_option()])
+    note = "Shared miles: with this booked, nothing affordable is left for Kelowna."
+
+    alert = decide_alert(conn, analysis, notes_for=lambda option: [note])
+
+    lines = alert.message.split("\n")
+    assert note in lines and lines.index(note) < len(lines) - 1     # before the closing "Data as of" line
+    assert alert.notes == (note,) and "Data as of" in lines[-1]
+
+
+def test_an_alert_without_notes_reads_as_before(conn):
+    trip = add_trip(conn)
+    analysis = analysis_for(trip, [good_option()])
+
+    plain = decide_alert(conn, analysis).message
+    empty = decide_alert(conn, analysis, notes_for=lambda option: []).message
+
+    assert plain == empty and "Shared miles" not in plain
+
+
+def test_the_note_is_asked_about_the_option_being_alerted_on(conn):
+    trip = add_trip(conn)
+    analysis = analysis_for(trip, [good_option()])
+    asked = []
+
+    decide_alert(conn, analysis, notes_for=lambda option: asked.append(option) or [])
+
+    assert asked == [analysis.affordable[0]]

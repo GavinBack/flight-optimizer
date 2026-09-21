@@ -25,6 +25,7 @@ class TripBaseline:
     cabin_fares: tuple[CashFare | None, ...]
     economy_fares: tuple[CashFare | None, ...]
     fetched_at: str | None = None  # the oldest search behind these fares (UTC ISO)
+    cabin_fetched_at: str | None = None  # the oldest search behind the award-cabin fares alone
 
     @staticmethod
     def _total(fares: tuple[CashFare | None, ...]) -> int | None:
@@ -71,13 +72,13 @@ def trip_baseline(
             (trip["destination"], trip["origin"], date.fromisoformat(trip["return_date"]))
         )
 
-    fetched: list[str] = []
+    fetched: dict[Cabin, list[str]] = {}
 
     def baseline_for(cabin: Cabin) -> tuple[CashFare | None, ...]:
         fares = []
         for origin, dest, on in directions:
             search = cash_fares.get_fares(conn, client, origin, dest, on, cabin, **fare_options)
-            fetched.append(search.fetched_at)
+            fetched.setdefault(cabin, []).append(search.fetched_at)
             fares.append(
                 cash_fares.cheapest_reasonable(
                     search.fares,
@@ -88,10 +89,12 @@ def trip_baseline(
         return tuple(fares)
 
     cabin_fares, economy_fares = baseline_for(cabin), baseline_for(Cabin.ECONOMY)
+    every_search = [t for times in fetched.values() for t in times]
     return TripBaseline(
         cabin_fares=cabin_fares,
         economy_fares=economy_fares,
-        fetched_at=min(fetched) if fetched else None,  # the oldest search sets how current this is
+        fetched_at=min(every_search) if every_search else None,  # the oldest search sets how current this is
+        cabin_fetched_at=min(fetched[cabin]) if cabin in fetched else None,
     )
 
 

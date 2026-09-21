@@ -68,6 +68,25 @@ CREATE TABLE IF NOT EXISTS cash_fare_cache (
     PRIMARY KEY (origin, destination, travel_date, cabin)
 );
 
+-- The cash baseline of each trip and cabin every time it was freshly searched, so a fare drop can be
+-- told from an ordinary one. Keyed by when the search ran, so a fare re-read from the cache is not
+-- counted twice. Cleared when the trip's dates change, because prices for other dates say nothing.
+CREATE TABLE IF NOT EXISTS cash_history (
+    trip_id    INTEGER NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+    cabin      TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    total      INTEGER NOT NULL,
+    PRIMARY KEY (trip_id, cabin, fetched_at)
+);
+
+-- A round-trip cash price the owner would book at, per trip and cabin.
+CREATE TABLE IF NOT EXISTS cash_targets (
+    trip_id INTEGER NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+    cabin   TEXT NOT NULL,
+    price   INTEGER NOT NULL CHECK (price > 0),
+    PRIMARY KEY (trip_id, cabin)
+);
+
 -- Seats.aero flight details, keyed by the search row's own UpdatedAt stamp. That stamp
 -- equals every flight entry's UpdatedAt (checked on live data), so an unchanged stamp
 -- means unchanged flights: safe to reuse with no time limit.
@@ -246,7 +265,12 @@ def update_trip(
     if new_return is not None and new_return < new_depart:
         raise ValueError("The return date is before the departure date.")
 
+    moved = (new_depart.isoformat(), new_return.isoformat() if new_return else None) != (
+        trip["depart_date"], trip["return_date"]
+    )
     with conn:
+        if moved:  # fares for other dates say nothing about these ones
+            conn.execute("DELETE FROM cash_history WHERE trip_id = ?", (trip_id,))
         conn.execute(
             "UPDATE trips SET name = ?, depart_date = ?, return_date = ?, active = ?, flexible = ? WHERE id = ?",
             (
@@ -258,6 +282,53 @@ def update_trip(
                 trip_id,
             ),
         )
+
+
+def record_cash_total(conn: sqlite3.Connection, trip_id: int, cabin: str, fetched_at: str, total: int) -> None:
+    """Remember a freshly searched cash baseline. The same search recorded twice is one row."""
+    with conn:
+        conn.execute(
+            "INSERT INTO cash_history (trip_id, cabin, fetched_at, total) VALUES (?, ?, ?, ?)"
+            " ON CONFLICT(trip_id, cabin, fetched_at) DO UPDATE SET total = excluded.total",
+            (trip_id, cabin, fetched_at, total),
+        )
+
+
+def cash_history(conn: sqlite3.Connection, trip_id: int, cabin: str, since: str) -> list[tuple[str, int]]:
+    """(fetched_at, total) for a trip and cabin since `since` (UTC ISO), oldest first."""
+    rows = conn.execute(
+        "SELECT fetched_at, total FROM cash_history WHERE trip_id = ? AND cabin = ? AND fetched_at >= ?"
+        " ORDER BY fetched_at",
+        (trip_id, cabin, since),
+    ).fetchall()
+    return [(row["fetched_at"], row["total"]) for row in rows]
+
+
+def set_cash_target(conn: sqlite3.Connection, trip_id: int, cabin: str, price: int) -> None:
+    if cabin not in CABINS:
+        raise ValueError(f"Unknown cabin {cabin!r}; expected one of {CABINS}")
+    if price <= 0:
+        raise ValueError("A cash target must be more than zero.")
+    if conn.execute("SELECT 1 FROM trips WHERE id = ?", (trip_id,)).fetchone() is None:
+        raise LookupError(f"No trip with id {trip_id}")
+    with conn:
+        conn.execute(
+            "INSERT INTO cash_targets (trip_id, cabin, price) VALUES (?, ?, ?)"
+            " ON CONFLICT(trip_id, cabin) DO UPDATE SET price = excluded.price",
+            (trip_id, cabin, price),
+        )
+
+
+def clear_cash_target(conn: sqlite3.Connection, trip_id: int, cabin: str) -> bool:
+    """True if there was a target to remove."""
+    with conn:
+        cur = conn.execute("DELETE FROM cash_targets WHERE trip_id = ? AND cabin = ?", (trip_id, cabin))
+    return cur.rowcount > 0
+
+
+def get_cash_targets(conn: sqlite3.Connection, trip_id: int) -> dict[str, int]:
+    rows = conn.execute("SELECT cabin, price FROM cash_targets WHERE trip_id = ?", (trip_id,)).fetchall()
+    return {row["cabin"]: row["price"] for row in rows}
 
 
 def set_trip_active(conn: sqlite3.Connection, trip_id: int, active: bool) -> None:

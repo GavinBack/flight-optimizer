@@ -737,3 +737,51 @@ def test_the_cabin_comparison_warns_that_awards_and_cash_may_be_on_different_dat
     assert "cash fares are for your exact dates only" in text
     exact = render_comparison(compare_cabins([build_analysis(add_trip(conn, name="Other", depart_date=JAN10), [], cabin=Cabin.BUSINESS)], TODAY))
     assert "exact dates only" not in exact
+
+
+# --- cash history and targets ---------------------------------------------------------------------------------------------
+
+def test_a_report_records_each_cabins_cash_total_as_history(conn):
+    add_trip(conn, name="Active One")
+    db.set_gateways(conn, 1, ["LAX"])
+
+    build_report(conn, FakeAwards(AWARD_TABLE, ALL_DETAILS), FakeCash(), today=TODAY)
+
+    rows = conn.execute("SELECT cabin, total FROM cash_history ORDER BY cabin").fetchall()
+    assert [(r["cabin"], r["total"]) for r in rows] == [("business", 2_000), ("economy", 600), ("premium_economy", 600)]
+
+
+def test_the_report_shows_history_and_the_target(conn):
+    from flight_optimizer.cashtrend import CashTrend
+
+    trip = add_trip(conn)
+    trend = CashTrend(current=699, previous=(760, 720, 740), first_seen=date(2026, 9, 12))
+
+    text = render_trip(trip, ["LAX"], [], BASELINE, BALANCES, today=TODAY, cabin=Cabin.ECONOMY, cash_trend=trend, cash_target=700)
+
+    assert "economy cash history: 3 earlier searches since Sep 12, low $720, typical $740" in text
+    assert "your economy target: $700 (not reached)" in text or "your economy target: $700 (reached)" in text
+
+
+def test_the_target_line_says_whether_it_was_reached(conn):
+    trip = add_trip(conn)
+    at_700 = TripBaseline(cabin_fares=(fare(350), fare(340)), economy_fares=(fare(350), fare(340)))
+
+    reached = render_trip(trip, [], [], at_700, BALANCES, today=TODAY, cabin=Cabin.ECONOMY, cash_target=700)
+    missed = render_trip(trip, [], [], at_700, BALANCES, today=TODAY, cabin=Cabin.ECONOMY, cash_target=600)
+
+    assert "target: $700 (reached)" in reached and "target: $600 (not reached)" in missed
+
+
+def test_a_first_search_says_there_is_nothing_to_compare_with_yet(conn):
+    from flight_optimizer.cashtrend import CashTrend
+
+    text = render(conn, [], cash_trend=CashTrend(current=2_267, previous=(), first_seen=None))
+
+    assert "this is the first search kept, so there is nothing to compare with yet" in text
+
+
+def test_no_history_lines_without_history_data(conn):
+    text = render(conn, [])
+
+    assert "cash history" not in text and "target" not in text

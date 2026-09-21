@@ -10,6 +10,7 @@ import sqlite3
 from dataclasses import dataclass
 
 from flight_optimizer import db
+from flight_optimizer.cashtrend import CashTrend, load_trend
 from flight_optimizer.affordability import TripOption, rank_trip
 from flight_optimizer.cash_fares import SerpApiClient, SerpApiError
 from flight_optimizer.enrichment import EnrichmentStats, enrich_result
@@ -27,6 +28,8 @@ class TripAnalysis:
     cash_note: str | None  # why there is no baseline, if there isn't
     stats: EnrichmentStats
     cabin: Cabin = Cabin.BUSINESS
+    cash_trend: CashTrend | None = None  # this cabin's cash fare against earlier searches
+    cash_target: int | None = None  # the round-trip price the owner said they would book at
 
     @property
     def affordable(self) -> list[TripOption]:
@@ -70,8 +73,14 @@ def _analyze_cabin(
         except SerpApiError as exc:
             note = cash_broken = f"Cash prices unavailable: {exc}"
 
+    trend = None
+    if baseline is not None and baseline.cabin_total is not None and baseline.cabin_fetched_at:
+        trend = load_trend(
+            conn, trip["id"], cabin.name.lower(), total=baseline.cabin_total, fetched_at=baseline.cabin_fetched_at
+        )
     analysis = TripAnalysis(
         trip=trip, gateways=gateways, ranked=ranked, baseline=baseline, cash_note=note,
-        stats=stats, cabin=cabin,
+        stats=stats, cabin=cabin, cash_trend=trend,
+        cash_target=db.get_cash_targets(conn, trip["id"]).get(cabin.name.lower()),
     )
     return analysis, cash_broken

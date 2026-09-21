@@ -188,7 +188,7 @@ def test_the_brief_says_no_balances_when_none_are_set(conn):
 
 
 def test_the_system_prompt_states_the_owners_rules():
-    for fact in ("never book", "reserve", "irreversible", "1 cent", "1.5x", "not instructions", "UNCHECKED".lower(),
+    for fact in ("never book", "reserve", "irreversible", "1 cent", "1.5x", "not instructions", "SHARED BALANCES".lower(),
                  "Use only figures that appear in the report"):
         assert fact.lower() in SYSTEM_PROMPT.lower()
 
@@ -313,3 +313,14 @@ def test_switching_a_trip_to_flexible_asks_again_and_the_prompt_explains_it(conn
 
     assert print_of(flexible) != before
     assert "flexible" in SYSTEM_PROMPT and "exact requested dates" in SYSTEM_PROMPT
+
+
+def test_the_brief_includes_the_shared_balances_check_only_for_several_trips(conn):
+    first = trip_analyses(conn)
+    second = trip_analyses(conn, name="Kelowna", origin="RNO", destination="YLW")
+
+    many = build_brief([first, second], {"capital_one": 100_000}, today=TODAY)
+    one = build_brief([first], {"capital_one": 100_000}, today=TODAY)
+
+    assert "SHARED BALANCES" in many and "SHARED BALANCES" not in one
+    assert "unchecked" not in SYSTEM_PROMPT.lower() and "SHARED BALANCES section" in SYSTEM_PROMPT

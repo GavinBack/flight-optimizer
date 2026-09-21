@@ -13,6 +13,7 @@ from flight_optimizer import db
 from flight_optimizer.analysis import TripAnalysis
 from flight_optimizer.buying import rank_buy_plans
 from flight_optimizer.cabins import cabin_label, compare_cabins
+from flight_optimizer.joint import build_joint
 from flight_optimizer.itineraries import STALE_AWARD_DAYS, Freshness
 from flight_optimizer.programs import PROGRAM_NAMES, STALE_AFTER_DAYS
 from flight_optimizer.promos import Promo
@@ -60,7 +61,8 @@ def _dates(trip: sqlite3.Row) -> str:
 
 def _alert_line(counts: dict[str, int]) -> str:
     award, sale, upgrade = counts.get("award", 0), counts.get("promo", 0), counts.get("upgrade", 0)
-    if not award and not sale and not upgrade:
+    cash = counts.get("cash", 0)
+    if not award and not sale and not upgrade and not cash:
         return "Alerts sent in the last 7 days: none."
     parts = []
     if award:
@@ -69,6 +71,8 @@ def _alert_line(counts: dict[str, int]) -> str:
         parts.append(f"{sale} sale")
     if upgrade:
         parts.append(f"{upgrade} better-cabin")
+    if cash:
+        parts.append(f"{cash} cash-fare")
     return "Alerts sent in the last 7 days: " + ", ".join(parts) + "."
 
 
@@ -188,6 +192,13 @@ def build_digest(
         if lines:
             lines.append("")
         lines += trip_section(group, alert_counts.get(trip_id, {}), promos, today)
+    if len(trips) > 1:
+        for pair in build_joint(list(trips.values()), balances, today).pairs:
+            if pair.conflict:
+                lines.append(
+                    f"Shared miles: {pair.first['name']} and {pair.second['name']} cannot both be booked by award "
+                    "right now. See the report."
+                )
     lines.append("")
     live = len(promos)
     lines.append(f"Buy-miles sales on record: {live}." if live else "No live buy-miles sales on record.")

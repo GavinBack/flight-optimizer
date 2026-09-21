@@ -166,3 +166,29 @@ def test_premium_economy_is_priced_in_its_own_cabin(conn):
     baseline = trip_baseline(conn, client, add_trip(conn, return_date=None), cabin=Cabin.PREMIUM_ECONOMY)
 
     assert (baseline.cabin_total, baseline.economy_total) == (640, 323)
+
+
+def test_the_baseline_records_when_the_award_cabin_alone_was_searched(conn):
+    import json
+    from dataclasses import asdict
+    from datetime import timedelta
+
+    older = (datetime.now(timezone.utc) - timedelta(hours=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    db.save_cash_fares(conn, origin="RNO", destination="SJO", travel_date=JAN9, cabin="economy",
+                       fares_json=json.dumps([asdict(fare(323))]), lowest_price=None, typical_low=None,
+                       typical_high=None, fetched_at=older)
+    client = RecordingClient({("RNO", "SJO", Cabin.BUSINESS): [fare(1505)]})
+
+    baseline = trip_baseline(conn, client, add_trip(conn, return_date=None), cabin=Cabin.BUSINESS)
+
+    assert baseline.fetched_at == older              # the oldest of everything used (the cached economy search)
+    assert baseline.cabin_fetched_at > older         # the business search itself was just made
+    assert baseline.cabin_fetched_at[:10] == datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def test_for_economy_both_fetch_times_are_the_same_search(conn):
+    client = RecordingClient({("RNO", "SJO", Cabin.ECONOMY): [fare(323)]})
+
+    baseline = trip_baseline(conn, client, add_trip(conn, return_date=None), cabin=Cabin.ECONOMY)
+
+    assert baseline.cabin_fetched_at == baseline.fetched_at is not None

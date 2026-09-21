@@ -287,3 +287,20 @@ def test_a_plan_on_the_asked_dates_is_headed_as_before(conn):
     _, text = plan_for(conn)
 
     assert "Jan 09 2027 - Jan 16 2027   (business)" in text.splitlines()[0] and "you asked" not in text
+
+
+def test_a_plan_lists_what_it_leaves_the_other_trips(conn):
+    trip = add_trip(conn)
+    analysis = analysis_for(trip, [good_option(seats=2)])
+    note = "Shared miles: with this booked, Kelowna keeps only economy by award."
+
+    text = render_plan(analysis, analysis.affordable[0], balances=BALANCES, generated_at=GENERATED, notes=(note,))
+
+    assert "OTHER TRIPS SHARE THESE MILES" in text and f"  {note}" in text
+    assert text.index("OTHER TRIPS SHARE") < text.index("\nNOTES")
+
+
+def test_a_plan_without_notes_has_no_such_section(conn):
+    _, text = plan_for(conn)
+
+    assert "OTHER TRIPS" not in text

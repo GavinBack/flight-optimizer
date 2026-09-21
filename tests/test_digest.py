@@ -321,3 +321,42 @@ def test_a_flexible_trip_says_so_in_the_digest_header(conn):
     lines = trip_section([analysis_for(trip, [affordable()])], {}, {}, TODAY)
 
     assert lines[0] == "Costa Rica: RNO > SJO  Jan 09 - Jan 16 (flexible: +/-3 days)"
+
+
+# --- trips that compete for the same miles ----------------------------------------------------------------------------
+
+def competing_analyses(conn, balances_pool):
+    from builders import leg, option
+    from flight_optimizer.seats_aero import Cabin
+
+    def aeroplan(each_way, tag):
+        return option([leg("RNO", "SJO", "aeroplan", each_way, JAN9, flights=tag)],
+                      [leg("SJO", "RNO", "aeroplan", each_way, JAN16, flights=tag + "b")], balances_pool, via=None)
+
+    first, second = add_trip(conn, name="Costa Rica"), add_trip(conn, name="Kelowna", destination="YLW")
+    return [analysis_for(first, [aeroplan(30_000, "a")], baseline_value=None, cabin=Cabin.BUSINESS),
+            analysis_for(second, [aeroplan(30_000, "k")], baseline_value=None, cabin=Cabin.BUSINESS)]
+
+
+def digest_of(analyses, balances):
+    return build_digest(analyses, alert_counts={}, promos={}, balances=balances, balance_updates={}, today=date.today())
+
+
+def test_the_digest_says_when_two_trips_cannot_both_be_booked_by_award(conn):
+    pool = {"capital_one": 100_000}
+
+    digest = digest_of(competing_analyses(conn, pool), pool)
+
+    assert "Shared miles: Costa Rica and Kelowna cannot both be booked by award right now. See the report." in digest.message.splitlines()
+
+
+def test_the_digest_is_silent_about_sharing_when_both_fit(conn):
+    pool = {"capital_one": 200_000}
+
+    assert "Shared miles" not in digest_of(competing_analyses(conn, pool), pool).message
+
+
+def test_a_single_trip_digest_never_mentions_sharing(conn):
+    pool = {"capital_one": 100_000}
+
+    assert "Shared miles" not in digest_of(competing_analyses(conn, pool)[:1], pool).message

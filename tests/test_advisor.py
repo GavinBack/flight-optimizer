@@ -195,3 +195,111 @@ def test_the_system_prompt_states_the_owners_rules():
 
 def test_token_estimates_follow_the_measured_ratio_for_report_text():
     assert estimate_tokens("x" * 2100) == 1000
+
+
+# --- saved advice ------------------------------------------------------------------------------------------
+
+def test_advice_is_saved_with_its_details_and_the_newest_is_found(tmp_path):
+    from datetime import datetime
+    from flight_optimizer.advisor import Advice, latest_advice, save_advice
+
+    directory = tmp_path / "advice"
+    older = save_advice(Advice("first", "m", 10, 5), generated_at=datetime(2026, 9, 20, 7, 0), directory=directory)
+    newer = save_advice(Advice("second", "m", 1_200, 300, truncated=True), generated_at=datetime(2026, 9, 21, 7, 0), directory=directory)
+
+    assert older.name == "advice-20260920-0700.txt"
+    assert "1,200 tokens in, 300 out" in newer.read_text() and "cut off" in newer.read_text()
+    assert latest_advice(directory) == newer
+
+
+def test_no_saved_advice_is_none(tmp_path):
+    from flight_optimizer.advisor import latest_advice
+
+    assert latest_advice(tmp_path / "missing") is None
+    (tmp_path / "advice").mkdir()
+    assert latest_advice(tmp_path / "advice") is None
+
+
+# --- the fingerprint: when is the situation "unchanged"? ---------------------------------------------------------
+
+from datetime import timedelta
+from dataclasses import replace
+
+from flight_optimizer.advisor import CASH_STEP, advice_date, fingerprint
+from flight_optimizer.promos import Promo
+from flight_optimizer.savings import TripBaseline
+from builders import fare
+
+BAL = {"capital_one": 100_000, "delta": 30_000}
+
+
+def print_of(analyses, balances=BAL, promos=None, model="m", today=TODAY):
+    return fingerprint([analyses], balances, promos, model=model, today=today)
+
+
+def situation(conn, options=None, cash=(2_267, 699)):
+    trip = conn.execute("SELECT * FROM trips ORDER BY id LIMIT 1").fetchone() or add_trip(conn)   # one trip, however often it is asked for
+    base = TripBaseline(cabin_fares=(fare(cash[0]),), economy_fares=(fare(cash[1]),))
+    return [analysis_for(trip, options if options is not None else [good_option()], baseline_value=base, cabin=Cabin.BUSINESS)]
+
+
+def test_the_same_situation_has_the_same_fingerprint(conn):
+    assert print_of(situation(conn)) == print_of(situation(conn))
+
+
+def test_time_passing_alone_is_not_a_change(conn):
+    # The date and the number of days old the data is tick up daily; neither changes the picture.
+    assert print_of(situation(conn), today=TODAY) == print_of(situation(conn), today=TODAY + timedelta(days=1))
+
+
+def test_data_crossing_into_a_worse_freshness_tier_is_a_change(conn):
+    assert print_of(situation(conn), today=date.today()) != print_of(situation(conn), today=date.today() + timedelta(days=9))
+
+
+def test_small_fare_moves_are_ignored_and_big_ones_are_not(conn):
+    base = print_of(situation(conn, cash=(2_267, 699)))
+
+    assert print_of(situation(conn, cash=(2_270, 701))) == base
+    assert print_of(situation(conn, cash=(2_267 + CASH_STEP * 2, 699))) != base
+
+
+@pytest.mark.parametrize("change", [
+    lambda conn: dict(balances={**BAL, "delta": 31_000}),
+    lambda conn: dict(balances={"capital_one": 100_000}),
+    lambda conn: dict(model="another-model"),
+    lambda conn: dict(analyses=situation(conn, options=[good_option(out_miles=12_000)])),
+    lambda conn: dict(analyses=situation(conn, options=[])),
+    lambda conn: dict(analyses=situation(conn, options=[good_option(flights=("X1", "X2", "X3", "X4"))])),
+    lambda conn: dict(promos={"delta": Promo(key="k", program="delta", kind="bonus", headline_percent=50, tiers=(),
+                                             ends=TODAY + timedelta(days=5), title="t", url="u", source="s", last_seen=TODAY)}),
+])
+def test_anything_the_advice_depends_on_changes_the_fingerprint(conn, change):
+    args = dict(analyses=situation(conn), balances=BAL, promos=None, model="m")
+    baseline_print = print_of(**args)
+
+    assert print_of(**{**args, **change(conn)}) != baseline_print
+
+
+def test_a_sale_seen_again_is_not_a_change(conn):
+    def sale(seen):
+        return {"delta": Promo(key="k", program="delta", kind="bonus", headline_percent=50, tiers=(),
+                               ends=TODAY + timedelta(days=5), title="t", url="u", source="s", last_seen=seen)}
+
+    analyses = situation(conn)
+
+    assert print_of(analyses, promos=sale(TODAY)) == print_of(analyses, promos=sale(TODAY + timedelta(days=1)))
+
+
+def test_changing_the_instructions_asks_again(conn, monkeypatch):
+    import flight_optimizer.advisor as advisor
+
+    before = print_of(situation(conn))
+    monkeypatch.setattr(advisor, "SYSTEM_PROMPT", advisor.SYSTEM_PROMPT + " Be brief.")
+
+    assert print_of(situation(conn)) != before
+
+
+def test_the_day_of_a_saved_answer_comes_from_its_file_name(tmp_path):
+    from pathlib import Path
+
+    assert advice_date(Path("advice-20260921-0700.txt")) == date(2026, 9, 21)

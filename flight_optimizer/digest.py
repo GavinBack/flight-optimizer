@@ -176,6 +176,7 @@ def build_digest(
     balances: dict[str, int],
     balance_updates: dict[str, str],
     today: date,
+    advice_on: date | None = None,
 ) -> Digest:
     trips: dict[int, list[TripAnalysis]] = {}
     for analysis in analyses:
@@ -190,6 +191,8 @@ def build_digest(
     live = len(promos)
     lines.append(f"Buy-miles sales on record: {live}." if live else "No live buy-miles sales on record.")
     lines.append(balance_line(balances, balance_updates, today))
+    if advice_on is not None:  # a pointer only: the advice discusses balances, so it never goes to the phone
+        lines.append(f"Latest advice ({advice_on:%b %d}): python -m flight_optimizer advise --last")
     lines.append("Full report: python -m flight_optimizer report")
 
     names = ", ".join(group[0].trip["name"] for group in trips.values())

@@ -13,12 +13,15 @@ The API is called directly over HTTPS (like the other clients here), and errors 
 without the underlying exception text, which could echo request details.
 """
 
-import sqlite3
+import hashlib
+import json
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
+from pathlib import Path
 
 import requests
 
+from flight_optimizer.alerts import option_key
 from flight_optimizer.analysis import TripAnalysis
 from flight_optimizer.cabins import MILE_VALUE_CENTS, UPGRADE_MAX_MULTIPLE
 from flight_optimizer.programs import PROGRAM_NAMES
@@ -170,6 +173,82 @@ def build_brief(
             analyses, balances, promos=promos, today=today, top_n=top_n, near_n=2, buy_n=2
         )
     return "\n\n".join(parts)
+
+
+def save_advice(advice: Advice, *, generated_at: datetime, directory: Path) -> Path:
+    """Keep an answer under `advice/` (git-ignored: it discusses balances), one file per run."""
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"advice-{generated_at:%Y%m%d-%H%M}.txt"
+    path.write_text(
+        f"ADVICE   generated {generated_at:%Y-%m-%d %H:%M}   {advice.model}   "
+        f"{advice.input_tokens:,} tokens in, {advice.output_tokens:,} out\n"
+        "Judgment over the tool's computed figures, not a booking instruction: verify before transferring miles.\n\n"
+        + advice.text + ("\n\n[The answer was cut off at the length limit.]" if advice.truncated else "") + "\n"
+    )
+    return path
+
+
+def latest_advice(directory: Path) -> Path | None:
+    """The most recently saved answer, or None."""
+    if not directory.exists():
+        return None
+    matches = sorted(directory.glob("advice-*.txt"))  # the timestamp in the name sorts by time
+    return matches[-1] if matches else None
+
+
+def advice_date(path: Path) -> date:
+    """The day a saved answer was made, from its file name (advice-YYYYMMDD-HHMM.txt)."""
+    return datetime.strptime(path.stem[len("advice-"):][:8], "%Y%m%d").date()
+
+
+CASH_STEP = 50  # dollars: a fare that moves less than this is not a change worth a new answer
+FINGERPRINT_OPTIONS = 8  # leading options per cabin: what the brief shows, with a few spare
+
+
+def fingerprint(
+    trips: list[list[TripAnalysis]],
+    balances: dict[str, int],
+    promos: dict[str, Promo] | None,
+    *,
+    model: str,
+    today: date,
+) -> str:
+    """A hash of what the advice depends on, so an unchanged situation is not paid for twice.
+
+    It covers the trips, balances, live sales, and for every cabin the cash fares (in `CASH_STEP` steps),
+    and the leading options with their miles, whether they are affordable, and their freshness tier. It
+    leaves out things that move every day without changing the picture: today's date, and how many days
+    old the data is (only its tier counts). The instructions and model are included, so changing them
+    asks again."""
+
+    def cash(total: int | None) -> int | None:
+        return None if total is None else round(total / CASH_STEP) * CASH_STEP
+
+    state = {
+        "instructions": SYSTEM_PROMPT, "model": model,
+        "balances": sorted((p, n) for p, n in balances.items() if n > 0),
+        "promos": sorted(
+            (p.program, p.kind, p.headline_percent, [repr(t) for t in p.tiers], str(p.ends))
+            for p in (promos or {}).values()
+        ),
+        "trips": [
+            [
+                {
+                    "trip": [a.trip["id"], a.trip["origin"], a.trip["destination"], a.trip["depart_date"], a.trip["return_date"]],
+                    "cabin": a.cabin.name,
+                    "cash": None if a.baseline is None else [cash(a.baseline.cabin_total), cash(a.baseline.economy_total)],
+                    "affordable": len(a.affordable),
+                    "options": [
+                        [option_key(o), o.total_miles, o.affordability.affordable, int(o.freshness(today))]
+                        for o in a.ranked[:FINGERPRINT_OPTIONS]
+                    ],
+                }
+                for a in analyses
+            ]
+            for analyses in trips
+        ],
+    }
+    return hashlib.sha256(json.dumps(state, sort_keys=True, default=str).encode()).hexdigest()
 
 
 def estimate_tokens(text: str) -> int:

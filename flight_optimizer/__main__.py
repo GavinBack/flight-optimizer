@@ -1,9 +1,9 @@
 """Command line.
 
     python -m flight_optimizer [report] [--top N]   report on every active trip
-    python -m flight_optimizer notify [--dry-run]   alert (via ntfy) on anything new
+    python -m flight_optimizer notify [--dry-run] [--no-advice]   alert (via ntfy) on anything new, then ask Claude for advice
     python -m flight_optimizer plan [TRIP] [--refresh]   show the booking plan
-    python -m flight_optimizer advise [TRIP] [--dry-run]   ask Claude to weigh the options (paid API)
+    python -m flight_optimizer advise [TRIP] [--dry-run] [--last]   ask Claude to weigh the options (paid API), or show the last answer
     python -m flight_optimizer done TRIP            mark a trip booked (stops alerts)
     python -m flight_optimizer test-notification    check that ntfy reaches your phone
     python -m flight_optimizer trip [list|add|set]   see, add or change trips
@@ -24,7 +24,10 @@ from datetime import date, datetime
 from pathlib import Path
 
 from flight_optimizer import db
-from flight_optimizer.advisor import SYSTEM_PROMPT, AdvisorError, AnthropicClient, build_brief, estimate_tokens
+from flight_optimizer.advisor import (
+    SYSTEM_PROMPT, AdvisorError, AnthropicClient, advice_date, build_brief, estimate_tokens, fingerprint,
+    latest_advice, save_advice,
+)
 from flight_optimizer.alerts import (
     assess_urgency, decide_alert, decide_promo_alert, decide_upgrade_alert, record_promo_sent, record_sent,
     record_upgrade_sent, usable_for_alert,
@@ -92,6 +95,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     notify = commands.add_parser("notify", help="send an ntfy alert for anything new")
     notify.add_argument("--dry-run", action="store_true", help="print what would be sent; send and save nothing")
+    notify.add_argument("--no-advice", action="store_true", help="skip the Claude advice that normally follows the checks")
 
     plan = commands.add_parser("plan", help="show the saved booking plan for a trip")
     plan.add_argument("trip_id", nargs="?", type=int)
@@ -104,6 +108,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     advise.add_argument("trip_id", nargs="?", type=int, help="omit to advise on every active trip in one call")
     advise.add_argument("--dry-run", action="store_true", help="print exactly what would be sent; send nothing, spend nothing")
+    advise.add_argument("--last", action="store_true", help="show the most recent saved advice (from `notify` or `advise`); no API calls")
 
     done = commands.add_parser("done", help="mark a trip booked, so it stops being searched and alerted on")
     done.add_argument("trip_id", type=int)
@@ -193,7 +198,9 @@ def _send(conn, clients: Clients, trip, alert, *, dry_run: bool, describe: str) 
     return True
 
 
-def _run_notify(conn, clients: Clients, plans_dir: Path, *, dry_run: bool, now: datetime) -> int:
+def _run_notify(
+    conn, clients: Clients, plans_dir: Path, *, dry_run: bool, now: datetime, advice: bool = True
+) -> int:
     trips = db.active_trips(conn)
     if not trips:
         print("No active trips. Mark a trip active to be alerted about it.")
@@ -210,10 +217,11 @@ def _run_notify(conn, clients: Clients, plans_dir: Path, *, dry_run: bool, now: 
 
     balances = db.get_balances(conn)
     failed = False
-    analyses = []
+    analyses, by_trip = [], []
     for trip in trips:
         trip_analyses = analyze_trip_cabins(conn, clients.awards, clients.cash, trip, balances)
         analyses += trip_analyses
+        by_trip.append(trip_analyses)
 
         for analysis in trip_analyses:
             failed |= _alerts_for(
@@ -229,11 +237,46 @@ def _run_notify(conn, clients: Clients, plans_dir: Path, *, dry_run: bool, now: 
             else:
                 failed = True
 
+    advice_dir = plans_dir.parent / "advice"
+    if advice:  # before the digest, so the digest can point at today's answer
+        _advise_after_checks(conn, clients, by_trip, balances, live_promos, now, advice_dir, dry_run=dry_run)
     if digest_due(conn, now) and not _send_digest(
-        conn, clients, analyses, live_promos, balances, now, dry_run=dry_run
+        conn, clients, analyses, live_promos, balances, now, advice_dir, dry_run=dry_run
     ):
         failed = True
     return 1 if failed else 0
+
+
+_ADVICE_FINGERPRINT = "advice:fingerprint"
+
+
+def _advise_after_checks(conn, clients: Clients, by_trip, balances, live_promos, now: datetime, advice_dir: Path, *, dry_run: bool) -> None:
+    """Ask Claude to weigh what this run gathered, and keep the answer for the laptop. It reuses the
+    analyses already computed (no extra Seats.aero or SerpApi calls), and is skipped when nothing the
+    advice depends on has changed since the last answer (see `advisor.fingerprint`). It never fails the
+    run: the alerts have already gone out, and it is kept off the phone because it discusses balances."""
+    if clients.advisor is None:
+        print("Advice: skipped, ANTHROPIC_API_KEY is not set.")
+        return
+    state = fingerprint(by_trip, balances, live_promos, model=clients.advisor.model, today=now.date())
+    last = latest_advice(advice_dir)
+    if last is not None and db.get_meta(conn, _ADVICE_FINGERPRINT) == state:
+        print(
+            f"Advice: {'would be ' if dry_run else ''}skipped, nothing has changed since the last answer "
+            f"({advice_date(last):%b %d}). Read it with: python -m flight_optimizer advise --last"
+        )
+        return
+    if dry_run:
+        print("Advice: would ask Claude (a paid call). A real run does; `advise --dry-run` shows what would be sent.")
+        return
+    try:
+        answer = clients.advisor.advise(build_brief(by_trip, balances, promos=live_promos, today=now.date()))
+    except AdvisorError as exc:
+        print(f"note: could not get advice: {exc}", file=sys.stderr)
+        return
+    path = save_advice(answer, generated_at=now, directory=advice_dir)
+    db.set_meta(conn, _ADVICE_FINGERPRINT, state)
+    print(f"Advice saved to {path} ({answer.input_tokens:,} tokens in, {answer.output_tokens:,} out). Read it with: python -m flight_optimizer advise --last")
 
 
 def _alerts_for(conn, clients: Clients, plans_dir: Path, analysis, live_promos, balances, now: datetime, *, dry_run: bool) -> bool:
@@ -279,7 +322,7 @@ def _alerts_for(conn, clients: Clients, plans_dir: Path, analysis, live_promos, 
     return failed
 
 
-def _send_digest(conn, clients: Clients, analyses, live_promos, balances, now: datetime, *, dry_run: bool) -> bool:
+def _send_digest(conn, clients: Clients, analyses, live_promos, balances, now: datetime, advice_dir: Path, *, dry_run: bool) -> bool:
     """Build and deliver the weekly digest. The weekly timer only restarts once it was really sent."""
     digest = build_digest(
         analyses,
@@ -288,6 +331,7 @@ def _send_digest(conn, clients: Clients, analyses, live_promos, balances, now: d
         balances=balances,
         balance_updates=db.balance_updates(conn),
         today=now.date(),
+        advice_on=advice_date(saved) if (saved := latest_advice(advice_dir)) is not None else None,
     )
     if not _send(conn, clients, {"name": "all trips"}, digest, dry_run=dry_run, describe="weekly digest"):
         return False
@@ -297,7 +341,7 @@ def _send_digest(conn, clients: Clients, analyses, live_promos, balances, now: d
     return True
 
 
-def _run_digest(conn, clients: Clients, now: datetime, *, dry_run: bool) -> int:
+def _run_digest(conn, clients: Clients, now: datetime, advice_dir: Path, *, dry_run: bool) -> int:
     trips = db.active_trips(conn)
     if not trips:
         print("No active trips, so there is nothing to summarize.")
@@ -311,10 +355,18 @@ def _run_digest(conn, clients: Clients, now: datetime, *, dry_run: bool) -> int:
     balances = db.get_balances(conn)
     analyses = [a for trip in trips for a in analyze_trip_cabins(conn, clients.awards, clients.cash, trip, balances)]
     live_promos = best_promos(active_promos(conn, now.date()))
-    return 0 if _send_digest(conn, clients, analyses, live_promos, balances, now, dry_run=dry_run) else 1
+    return 0 if _send_digest(conn, clients, analyses, live_promos, balances, now, advice_dir, dry_run=dry_run) else 1
 
 
-def _run_advise(conn, clients: Clients, args, now: datetime) -> int:
+def _run_advise(conn, clients: Clients, args, now: datetime, advice_dir: Path) -> int:
+    if args.last:
+        path = latest_advice(advice_dir)
+        if path is None:
+            print("No saved advice yet. It is saved after each `notify` run, or run: python -m flight_optimizer advise")
+            return 1
+        print(f"Advice file: {path}\n")
+        print(path.read_text())
+        return 0
     trips = [_pick_trip(conn, args.trip_id)] if args.trip_id is not None else db.active_trips(conn)
     if not trips:
         print("No active trips, so there is nothing to advise on.")
@@ -338,10 +390,15 @@ def _run_advise(conn, clients: Clients, args, now: datetime) -> int:
           f"(about {size:,} input tokens)...\n")
     advice = clients.advisor.advise(brief)
     print(advice.text)
+    saved = save_advice(advice, generated_at=now, directory=advice_dir)
+    if args.trip_id is None:  # advice on every active trip is what `notify` would ask for, so it need not ask again
+        db.set_meta(conn, _ADVICE_FINGERPRINT, fingerprint(
+            analyses, balances, live_promos, model=clients.advisor.model, today=now.date()))
     if advice.truncated:
         print("\n[The answer was cut off at the length limit.]")
     print(f"\nAdvice from {advice.model}: {advice.input_tokens:,} tokens in, {advice.output_tokens:,} out. "
-          "It is judgment over the computed figures, not a booking instruction: verify before transferring miles.")
+          "It is judgment over the computed figures, not a booking instruction: verify before transferring miles."
+          f"\nSaved to {saved}")
     return 0
 
 
@@ -622,7 +679,7 @@ def main(
             print("Test notification sent. Check your phone.")
             return 0
         if args.command == "digest":
-            return _run_digest(conn, clients, now, dry_run=args.dry_run)
+            return _run_digest(conn, clients, now, plans_dir.parent / "advice", dry_run=args.dry_run)
         if args.command == "promos":
             try:
                 return _run_promos(conn, args, clients, now)
@@ -630,11 +687,11 @@ def main(
                 print(f"error: {exc}", file=sys.stderr)
                 return 1
         if args.command == "notify":
-            return _run_notify(conn, clients, plans_dir, dry_run=args.dry_run, now=now)
+            return _run_notify(conn, clients, plans_dir, dry_run=args.dry_run, now=now, advice=not args.no_advice)
         if args.command == "plan":
             return _run_plan(conn, clients, plans_dir, args, now)
         if args.command == "advise":
-            return _run_advise(conn, clients, args, now)
+            return _run_advise(conn, clients, args, now, plans_dir.parent / "advice")
         print(build_report(conn, clients.awards, clients.cash, top_n=args.top))
         return 0
     except (SeatsAeroError, NtfyError, AdvisorError, LookupError) as exc:

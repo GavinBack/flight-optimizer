@@ -1330,3 +1330,231 @@ def test_advise_with_no_active_trips_does_nothing(env, capsys):
     code, _, _ = run(["advise"], tmp_path, advisor=advisor)
 
     assert code == 0 and advisor.briefs == [] and "nothing to advise on" in capsys.readouterr().out
+
+
+# --- advice after each notify run ------------------------------------------------------------------------------
+
+def test_notify_asks_claude_after_the_alerts_and_saves_the_answer(env, capsys):
+    _, tmp_path = env
+    advisor = FakeAdvisor(text="RECOMMENDATION: economy.")
+    awards = both_cabins()
+
+    code, _, ntfy = run(["notify"], tmp_path, awards=awards, advisor=advisor)
+
+    out = capsys.readouterr().out
+    assert code == 0 and len(ntfy.sent) == 2                       # the alerts went out as usual
+    (brief,) = advisor.briefs
+    assert "CABINS AT A GLANCE" in brief and "17,950 miles" in brief
+    (saved,) = (tmp_path / "advice").glob("advice-*.txt")
+    assert "RECOMMENDATION: economy." in saved.read_text()
+    assert "Advice saved to" in out and "advise --last" in out
+
+
+def test_the_advice_never_goes_to_the_phone(env):
+    _, tmp_path = env
+
+    _, _, ntfy = run(["notify"], tmp_path, advisor=FakeAdvisor(text="Use your 100,000 Capital One miles"))
+
+    assert all("Capital One" not in sent["message"] for sent in ntfy.sent)
+
+
+def test_notify_needs_no_extra_searches_for_the_advice(env):
+    _, tmp_path = env
+    without, with_advice = FakeAwards(), FakeAwards()
+
+    run(["notify", "--no-advice"], tmp_path, awards=without, advisor=FakeAdvisor())
+    run(["notify"], tmp_path, awards=with_advice, advisor=FakeAdvisor())
+
+    assert len(with_advice.searched) == len(without.searched)
+
+
+def test_no_advice_skips_the_claude_call(env):
+    _, tmp_path = env
+    advisor = FakeAdvisor()
+
+    run(["notify", "--no-advice"], tmp_path, advisor=advisor)
+
+    assert advisor.briefs == [] and not (tmp_path / "advice").exists()
+
+
+def test_a_dry_run_does_not_spend_a_claude_call(env, capsys):
+    _, tmp_path = env
+    advisor = FakeAdvisor()
+
+    run(["notify", "--dry-run"], tmp_path, advisor=advisor)
+
+    assert advisor.briefs == [] and "Advice: would ask Claude" in capsys.readouterr().out
+
+
+def test_without_a_key_notify_says_advice_was_skipped_and_still_succeeds(env, capsys):
+    _, tmp_path = env
+
+    code, _, ntfy = run(["notify"], tmp_path, advisor=None)
+
+    assert code == 0 and len(ntfy.sent) == 1
+    assert "Advice: skipped, ANTHROPIC_API_KEY is not set." in capsys.readouterr().out
+
+
+def test_a_claude_failure_never_fails_the_run_or_loses_the_alerts(env, capsys):
+    from flight_optimizer.advisor import AdvisorError
+    conn, tmp_path = env
+
+    code, _, ntfy = run(["notify"], tmp_path, advisor=FakeAdvisor(error=AdvisorError("Claude returned HTTP 429: limit")))
+
+    assert code == 0 and len(ntfy.sent) == 1 and len(alert_rows(conn)) == 1
+    assert "could not get advice: Claude returned HTTP 429" in capsys.readouterr().err
+
+
+def test_nothing_is_asked_when_there_are_no_active_trips(env):
+    conn, tmp_path = env
+    db.set_trip_active(conn, 1, False)
+    advisor = FakeAdvisor()
+
+    run(["notify"], tmp_path, advisor=advisor)
+
+    assert advisor.briefs == []
+
+
+def test_advise_saves_its_answer_and_last_shows_it_without_calling_claude(env, capsys):
+    _, tmp_path = env
+    run(["advise"], tmp_path, advisor=FakeAdvisor(text="RECOMMENDATION: wait."))
+    capsys.readouterr()
+    advisor = FakeAdvisor()
+
+    code, _, _ = run(["advise", "--last"], tmp_path, advisor=advisor)
+
+    out = capsys.readouterr().out
+    assert code == 0 and "RECOMMENDATION: wait." in out and "Advice file:" in out
+    assert advisor.briefs == []
+
+
+def test_advise_last_with_nothing_saved_says_how_to_make_some(env, capsys):
+    _, tmp_path = env
+
+    code, _, _ = run(["advise", "--last"], tmp_path)
+
+    assert code == 1 and "No saved advice yet" in capsys.readouterr().out
+
+
+# --- skipping advice when nothing changed --------------------------------------------------------------------------
+
+def test_a_second_run_with_nothing_changed_does_not_ask_again(env, capsys):
+    _, tmp_path = env
+    advisor = FakeAdvisor()
+    run(["notify"], tmp_path, advisor=advisor)
+    capsys.readouterr()
+
+    run(["notify"], tmp_path, advisor=advisor)
+
+    assert len(advisor.briefs) == 1
+    out = capsys.readouterr().out
+    assert "Advice: skipped, nothing has changed since the last answer" in out and "advise --last" in out
+
+
+def test_a_changed_balance_asks_again(env):
+    conn, tmp_path = env
+    advisor = FakeAdvisor()
+    run(["notify"], tmp_path, advisor=advisor)
+
+    db.set_balance(conn, "delta", 31_000)
+    run(["notify"], tmp_path, advisor=advisor)
+
+    assert len(advisor.briefs) == 2
+
+
+def test_new_award_availability_asks_again(env):
+    _, tmp_path = env
+    advisor = FakeAdvisor()
+    run(["notify"], tmp_path, awards=FakeAwards(), advisor=advisor)
+
+    run(["notify"], tmp_path, awards=both_cabins(), advisor=advisor)
+
+    assert len(advisor.briefs) == 2
+
+
+def test_it_asks_again_if_the_saved_answer_is_gone(env):
+    _, tmp_path = env
+    advisor = FakeAdvisor()
+    run(["notify"], tmp_path, advisor=advisor)
+    for saved in (tmp_path / "advice").glob("*.txt"):
+        saved.unlink()
+
+    run(["notify"], tmp_path, advisor=advisor)
+
+    assert len(advisor.briefs) == 2
+
+
+def test_a_failed_call_is_retried_next_run(env):
+    from flight_optimizer.advisor import AdvisorError
+    _, tmp_path = env
+    run(["notify"], tmp_path, advisor=FakeAdvisor(error=AdvisorError("HTTP 529")))
+    advisor = FakeAdvisor()
+
+    run(["notify"], tmp_path, advisor=advisor)
+
+    assert len(advisor.briefs) == 1     # nothing was recorded as answered, so it is asked
+
+
+def test_a_dry_run_says_whether_it_would_ask_or_skip(env, capsys):
+    _, tmp_path = env
+    advisor = FakeAdvisor()
+    run(["notify"], tmp_path, advisor=advisor)
+    capsys.readouterr()
+
+    run(["notify", "--dry-run"], tmp_path, advisor=advisor)
+
+    assert "Advice: would be skipped, nothing has changed" in capsys.readouterr().out
+    assert len(advisor.briefs) == 1
+
+
+def test_advise_on_every_trip_means_notify_need_not_ask_again(env):
+    _, tmp_path = env
+    advisor = FakeAdvisor()
+    run(["advise"], tmp_path, advisor=advisor)
+
+    run(["notify"], tmp_path, advisor=advisor)
+
+    assert len(advisor.briefs) == 1
+
+
+def test_advise_on_one_trip_does_not_stand_in_for_the_full_check(env):
+    conn, tmp_path = env
+    db.add_trip(conn, name="Kelowna", origin="RNO", destination="YLW", depart_date=JAN9, return_date=JAN16, active=True)
+    advisor = FakeAdvisor()
+    run(["advise", "1"], tmp_path, advisor=advisor)
+
+    run(["notify"], tmp_path, advisor=advisor)
+
+    assert len(advisor.briefs) == 2
+
+
+# --- the digest points at the advice ---------------------------------------------------------------------------------
+
+def test_the_weekly_digest_points_at_todays_advice_without_quoting_it(env):
+    conn, tmp_path = env
+    make_digest_due(conn)
+
+    _, _, ntfy = run(["notify"], tmp_path, advisor=FakeAdvisor(text="Use your 100,000 Capital One miles"))
+
+    (digest,) = digests(ntfy)
+    assert f"Latest advice ({datetime.now():%b %d}): python -m flight_optimizer advise --last" in digest["message"]
+    assert "100,000" not in digest["message"] and "Capital One miles" not in digest["message"]
+
+
+def test_the_digest_has_no_advice_line_when_there_is_none(env):
+    conn, tmp_path = env
+    make_digest_due(conn)
+
+    _, _, ntfy = run(["notify"], tmp_path, advisor=None)
+
+    assert "Latest advice" not in digests(ntfy)[0]["message"]
+
+
+def test_the_digest_command_points_at_the_latest_saved_advice(env):
+    conn, tmp_path = env
+    run(["advise"], tmp_path, advisor=FakeAdvisor())
+    make_digest_due(conn)
+
+    _, _, ntfy = run(["digest"], tmp_path)
+
+    assert "Latest advice (" in digests(ntfy)[0]["message"]

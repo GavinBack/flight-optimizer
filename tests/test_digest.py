@@ -297,3 +297,19 @@ def test_an_affordable_award_can_be_the_cheap_way_to_a_better_cabin(conn):
     lines = cabins_section(conn, business=(1500, 1500), business_options=[affordable()])
 
     assert "Better cabin worth a look: business at $718 by award (+$98, 1.16x)." in lines
+
+
+# --- the pointer to the latest advice ----------------------------------------------------------------------------
+
+def test_the_digest_points_at_the_latest_advice_when_there_is_one(conn):
+    trip = add_trip(conn)
+    digest = build_digest(
+        [analysis_for(trip, [affordable()])], alert_counts={}, promos={}, balances=SHORT,
+        balance_updates={}, today=TODAY, advice_on=date(2026, 9, 20),
+    )
+
+    assert "Latest advice (Sep 20): python -m flight_optimizer advise --last" in digest.message.splitlines()
+
+
+def test_without_advice_the_digest_has_no_such_line(conn):
+    assert "Latest advice" not in digest_for(conn, [affordable()]).message

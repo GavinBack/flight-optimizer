@@ -13,6 +13,7 @@ from flight_optimizer import db
 from flight_optimizer.affordability import TripOption, slow_transfers
 from flight_optimizer.buying import BuyPlan, promo_threshold_cents, rank_buy_plans
 from flight_optimizer.analysis import TripAnalysis
+from flight_optimizer.cabins import MILE_VALUE_CENTS, UPGRADE_MAX_MULTIPLE, Upgrade, cabin_label, compare_cabins
 from flight_optimizer.connections import ConnectionClass
 from flight_optimizer.itineraries import Freshness, is_stale
 from flight_optimizer.promos import Promo
@@ -69,9 +70,9 @@ def assess_urgency(option: TripOption) -> Urgency:
 
 
 def option_key(option: TripOption) -> str:
-    """Stable identity of an option: which flights, on which program and date."""
+    """Stable identity of an option: which flights, in which cabin, on which program and date."""
     return "|".join(
-        f"{leg.source}:{leg.origin}>{leg.destination}:{leg.date.isoformat()}:{leg.flight_numbers}"
+        f"{leg.cabin.name}:{leg.source}:{leg.origin}>{leg.destination}:{leg.date.isoformat()}:{leg.flight_numbers}"
         for leg in option_legs(option)
     )
 
@@ -131,6 +132,7 @@ def _changed_legs(option: TripOption, other: TripOption) -> list[str]:
 
 def build_alert(analysis: TripAnalysis, option: TripOption, *, fallback: TripOption | None) -> Alert:
     trip = analysis.trip
+    cabin = cabin_label(analysis.cabin)
     urgency = assess_urgency(option)
 
     value_line = f"{option.total_miles:,} miles"
@@ -139,11 +141,11 @@ def build_alert(analysis: TripAnalysis, option: TripOption, *, fallback: TripOpt
         if value.cents_per_mile_vs_cabin is not None:
             value_line += (
                 f" ({value.cents_per_mile_vs_cabin:.1f} c/mile vs "
-                f"${value.cabin_cash:,} {trip['cabin'].replace('_', ' ')} cash)"
+                f"${value.cabin_cash:,} {cabin} cash)"
             )
 
     lines = [
-        f"{trip['origin']} > {trip['destination']}  {_dates(trip)}",
+        f"{trip['origin']} > {trip['destination']}  {_dates(trip)}  ({cabin})",
         value_line,
         f"{urgency.label}: {urgency.reason}",
     ]
@@ -169,7 +171,7 @@ def build_alert(analysis: TripAnalysis, option: TripOption, *, fallback: TripOpt
         option=option,
         urgency=urgency,
         key=option_key(option),
-        title=f"{trip['name']}: {option.total_miles:,} miles",
+        title=f"{trip['name']} ({cabin}): {option.total_miles:,} miles",
         message="\n".join(lines),
         click=click,
         priority=urgency.priority,
@@ -181,10 +183,23 @@ def _parse_time(value: str) -> datetime:
     return datetime.strptime(value, _TIME_FORMAT).replace(tzinfo=timezone.utc)
 
 
+def worth_the_miles(analysis: TripAnalysis, option: TripOption) -> bool:
+    """False when the miles would buy less than `MILE_VALUE_CENTS` of cash fare: paying that cabin's
+    cash price is then the better deal. With no cash price to compare, the option is not judged."""
+    if analysis.baseline is None:
+        return True
+    cents = estimate_value(option, analysis.baseline).cents_per_mile_vs_cabin
+    return cents is None or cents >= MILE_VALUE_CENTS
+
+
 def usable_for_alert(analysis: TripAnalysis, today: date) -> list[TripOption]:
-    """Affordable options whose data is not stale. Offers and availability should be
-    current, so an option resting on old data is never alerted on (the report still lists it)."""
-    return [o for o in analysis.affordable if o.freshness(today) is not Freshness.STALE]
+    """Affordable options whose data is not stale and whose miles beat paying cash. Offers and
+    availability should be current, so an option resting on old data is never alerted on (the
+    report still lists it)."""
+    return [
+        o for o in analysis.affordable
+        if o.freshness(today) is not Freshness.STALE and worth_the_miles(analysis, o)
+    ]
 
 
 def decide_alert(
@@ -279,9 +294,10 @@ def build_promo_alert(analysis: TripAnalysis, plan: BuyPlan) -> PromoAlert:
     from flight_optimizer.report import purchase_text  # local import: report imports this module's siblings
 
     trip = analysis.trip
+    cabin = cabin_label(analysis.cabin)
     programs = ", ".join(p.program for p in plan.purchases)
     lines = [
-        f"{trip['origin']} > {trip['destination']}  {_dates(trip)}",
+        f"{trip['origin']} > {trip['destination']}  {_dates(trip)}  ({cabin})",
         f"A {programs} sale makes a {plan.option.total_miles:,}-mile option affordable.",
     ]
     lines += [f"- {purchase_text(p)}" for p in plan.purchases]
@@ -293,7 +309,7 @@ def build_promo_alert(analysis: TripAnalysis, plan: BuyPlan) -> PromoAlert:
     click = next((p.quote.promo_url for p in plan.purchases if p.quote.promo_url), None)
     return PromoAlert(
         trip_id=trip["id"], plan=plan, key=_promo_key(plan),
-        title=f"{trip['name']}: {programs} sale closes a gap",
+        title=f"{trip['name']} ({cabin}): {programs} sale closes a gap",
         message="\n".join(lines), click=click, priority=3, tags=("moneybag",),
     )
 
@@ -321,4 +337,76 @@ def record_promo_sent(conn: sqlite3.Connection, alert: PromoAlert) -> None:
     db.record_alert(
         conn, trip_id=alert.trip_id, alert_type="promo", dedupe_key=alert.key,
         miles=alert.plan.option.total_miles, cash_price=alert.plan.total_cost,
+    )
+
+
+# --- better-cabin alerts ----------------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class UpgradeAlert:
+    """A better cabin whose cash fare is close to the cheapest way to fly the trip."""
+
+    trip_id: int
+    upgrade: Upgrade
+    key: str
+    title: str
+    message: str
+    click: str | None
+    priority: int
+    tags: tuple[str, ...]
+
+
+def _fares_text(analysis: TripAnalysis) -> str:
+    fares = analysis.baseline.cabin_fares
+    return ", ".join(f"{d} ${f.price:,}" for d, f in zip(("out", "back"), fares))
+
+
+def build_upgrade_alert(analysis: TripAnalysis, upgrade: Upgrade) -> UpgradeAlert:
+    trip = analysis.trip
+    cabin, over = cabin_label(upgrade.outlook.cabin), cabin_label(upgrade.over.cabin)
+    lines = [
+        f"{trip['origin']} > {trip['destination']}  {_dates(trip)}",
+        f"{cabin.capitalize()} by cash is ${upgrade.outlook.cash:,} ({_fares_text(analysis)}), only "
+        f"${upgrade.extra:,.0f} more than the cheapest way to fly ({over}, ${upgrade.over.best_cost:,.0f}).",
+        f"That is {upgrade.multiple:.2f}x; better cabins are flagged at {UPGRADE_MAX_MULTIPLE:g}x or less.",
+    ]
+    if analysis.baseline.fetched_at:
+        lines.append(f"Cash fares as of {analysis.baseline.fetched_at[:10]}. Verify the fare before booking.")
+    lines.append("Details: python -m flight_optimizer report")
+    return UpgradeAlert(
+        trip_id=trip["id"], upgrade=upgrade, key=f"upgrade:{upgrade.outlook.cabin.name}",
+        title=f"{trip['name']}: {cabin} is only ${upgrade.extra:,.0f} more",
+        message="\n".join(lines), click=None, priority=3, tags=("chart_with_upwards_trend",),
+    )
+
+
+def decide_upgrade_alert(
+    conn: sqlite3.Connection, analyses: list[TripAnalysis], *, now: datetime | None = None
+) -> UpgradeAlert | None:
+    """An alert when a better cabin's CASH fare is within `UPGRADE_MAX_MULTIPLE` of the cheapest way to
+    fly one trip (the trip's `analyses`, one per cabin). Cabins that are cheap because of an affordable
+    award already produce an award alert, so they are not repeated here. Only the best cabin is
+    reported, and not again within `RE_ALERT_DAYS` unless it got cheaper."""
+    when = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    comparison = compare_cabins(analyses, when.date())
+    by_cabin = {a.cabin: a for a in analyses}
+    cash_upgrades = [u for u in comparison.upgrades if u.outlook.best_way == "cash"]
+    if not cash_upgrades:
+        return None
+    best = max(cash_upgrades, key=lambda u: list(by_cabin).index(u.outlook.cabin))
+    alert = build_upgrade_alert(by_cabin[best.outlook.cabin], best)
+
+    last = db.last_alert(conn, alert.trip_id, alert.key)
+    if last is not None:
+        recent = when - _parse_time(last["created_at"]) < timedelta(days=RE_ALERT_DAYS)
+        cheaper = last["cash_price"] is not None and best.outlook.cash < last["cash_price"]
+        if recent and not cheaper:
+            return None
+    return alert
+
+
+def record_upgrade_sent(conn: sqlite3.Connection, alert: UpgradeAlert) -> None:
+    db.record_alert(
+        conn, trip_id=alert.trip_id, alert_type="upgrade", dedupe_key=alert.key,
+        cash_price=alert.upgrade.outlook.cash,
     )

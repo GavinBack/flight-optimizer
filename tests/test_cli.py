@@ -103,6 +103,83 @@ def alert_rows(conn):
     return conn.execute("SELECT * FROM alert_history").fetchall()
 
 
+def both_cabins():
+    """The same trip on sale in economy (a quarter of the miles) and business, from one set of rows."""
+    from dataclasses import replace
+
+    table = {
+        pair: rows + [replace(r, cabin=Cabin.ECONOMY, miles=r.miles // 4) for r in rows]
+        for pair, rows in TABLE.items()
+    }
+    detail_table = {}
+    for key, d in DETAILS.items():
+        business = d.options[0]
+        detail_table[key] = replace(
+            d, options=(business, replace(business, cabin=Cabin.ECONOMY, miles=business.miles // 4))
+        )
+    return FakeAwards(table, detail_table)
+
+
+def test_every_cabin_is_searched_once_and_alerted_on_separately(env, capsys):
+    conn, tmp_path = env
+    awards = both_cabins()
+
+    code, _, ntfy = run(["notify"], tmp_path, awards=awards)
+
+    assert code == 0
+    assert [s["title"] for s in ntfy.sent] == [
+        "Costa Rica (economy): 17,950 miles", "Costa Rica (business): 71,800 miles",
+    ]
+    assert len(awards.searched) == len(set(awards.searched))   # three cabins, no repeated search
+    assert len(alert_rows(conn)) == 2
+    assert len(list((tmp_path / "plans").glob("*.txt"))) == 2  # one plan per cabin, none overwritten
+    assert "Costa Rica (premium economy): nothing new to alert on." in capsys.readouterr().out
+
+
+def test_running_again_repeats_neither_cabin(env):
+    _, tmp_path = env
+    run(["notify"], tmp_path, awards=both_cabins())
+
+    _, _, ntfy = run(["notify"], tmp_path, awards=both_cabins())
+
+    assert ntfy.sent == []
+
+
+def test_plan_can_be_shown_for_one_cabin(env, capsys):
+    _, tmp_path = env
+    run(["notify"], tmp_path, awards=both_cabins())
+    capsys.readouterr()
+
+    run(["plan", "1", "--cabin", "economy"], tmp_path)
+    economy = capsys.readouterr().out
+    run(["plan", "1", "--cabin", "business"], tmp_path)
+    business = capsys.readouterr().out
+
+    assert "(economy)" in economy and "17,950 miles" in economy
+    assert "(business)" in business and "71,800 miles" in business
+
+
+def test_plan_refresh_builds_one_plan_per_cabin_with_an_affordable_option(env, capsys):
+    _, tmp_path = env
+
+    run(["plan", "1", "--refresh"], tmp_path, awards=both_cabins())
+
+    out = capsys.readouterr().out
+    assert out.count("BOOKING PLAN") == 2
+    assert "Costa Rica (premium economy): no affordable option right now" in out
+
+
+def test_the_report_compares_the_cabins(env, capsys):
+    _, tmp_path = env
+
+    run(["report"], tmp_path, awards=both_cabins())
+
+    out = capsys.readouterr().out
+    assert "CABINS AT A GLANCE" in out
+    for cabin in ("(economy)", "(premium economy)", "(business)"):
+        assert cabin in out
+
+
 def test_dry_run_prints_the_alert_and_changes_nothing(env, capsys):
     conn, tmp_path = env
 
@@ -110,7 +187,7 @@ def test_dry_run_prints_the_alert_and_changes_nothing(env, capsys):
 
     out = capsys.readouterr().out
     assert code == 0
-    assert "would send for Costa Rica" in out and "Costa Rica: 71,800 miles" in out
+    assert "would send for Costa Rica" in out and "Costa Rica (business): 71,800 miles" in out
     assert ntfy.sent == [] and alert_rows(conn) == [] and not (tmp_path / "plans").exists()
 
 
@@ -130,7 +207,7 @@ def test_notify_sends_records_and_saves_the_plan(env, capsys):
     out = capsys.readouterr().out
     assert code == 0 and len(ntfy.sent) == 1
     sent = ntfy.sent[0]
-    assert sent["title"] == "Costa Rica: 71,800 miles"
+    assert sent["title"] == "Costa Rica (business): 71,800 miles"
     assert sent["priority"] == 4 and "warning" in sent["tags"]  # 2 seats left: act today
     assert "Full steps: python -m flight_optimizer plan 1" in sent["message"]
     assert sent["click"] == "https://book.example/x"
@@ -178,7 +255,7 @@ def test_only_active_trips_are_searched_and_alerted_on(env):
     _, awards, ntfy = run(["notify"], tmp_path)
 
     assert not any("XXX" in pair or "YYY" in pair for pair in awards.searched)
-    assert [s["title"] for s in ntfy.sent] == ["Costa Rica: 71,800 miles"]
+    assert [s["title"] for s in ntfy.sent] == ["Costa Rica (business): 71,800 miles"]
 
 
 def test_notify_with_no_active_trips_says_so(env, capsys):
@@ -549,8 +626,8 @@ def test_notify_stays_silent_and_says_why_when_every_option_rests_on_stale_data(
 
     out = capsys.readouterr().out
     assert code == 0 and ntfy.sent == [] and alert_rows(conn) == []
-    assert "every one relies on award data older than 7 days, so no alert was sent" in out
-    assert "nothing new to alert on" not in out
+    assert "Costa Rica (business): affordable options exist, but every one relies on award data older than 7 days" in out
+    assert "(business): nothing new to alert on" not in out
 
 
 def test_the_stale_options_are_still_visible_in_the_report(env, capsys):
@@ -743,7 +820,7 @@ def test_notify_sends_a_sale_alert_when_a_known_tier_sale_closes_a_gap(env, caps
 
     assert code == 0 and len(ntfy.sent) == 1
     sent = ntfy.sent[0]
-    assert sent["title"] == "Costa Rica: delta sale closes a gap" and sent["click"] == "https://delta.test/sale"
+    assert sent["title"] == "Costa Rica (business): delta sale closes a gap" and sent["click"] == "https://delta.test/sale"
     assert "Total: 71,800 miles + $225.75 (retail would be $301.00)." in sent["message"]
     (row,) = alert_rows(conn)
     assert row["alert_type"] == "promo" and row["cash_price"] is not None
@@ -907,7 +984,7 @@ def test_the_digest_follows_the_alerts_and_counts_them(env):
     _, _, ntfy = run(["notify"], tmp_path)
 
     titles = [m["title"] for m in ntfy.sent]
-    assert titles[0] == "Costa Rica: 71,800 miles" and titles[-1].startswith("Weekly flight check")
+    assert titles[0] == "Costa Rica (business): 71,800 miles" and titles[-1].startswith("Weekly flight check")
     assert "Alerts sent in the last 7 days: 1 award." in digests(ntfy)[0]["message"]
 
 
@@ -1010,3 +1087,140 @@ def test_a_failed_digest_command_exits_nonzero_and_does_not_reset_the_timer(env)
     code, _, _ = run(["digest"], tmp_path, ntfy=FakeNtfy(fail=True))
 
     assert code == 1 and digest_due(conn, datetime.now())
+
+
+
+# --- the trip command -----------------------------------------------------------------------------------------------------
+
+def trip_rows(conn):
+    return conn.execute("SELECT * FROM trips ORDER BY id").fetchall()
+
+
+def test_trip_with_no_action_lists_the_trips(env, capsys):
+    _, tmp_path = env
+
+    code, _, _ = run(["trip"], tmp_path)
+
+    out = capsys.readouterr().out
+    assert code == 0 and "Costa Rica" in out and "RNO > SJO" in out and "LAX" in out
+
+
+def test_trip_add_saves_it_and_says_what_it_will_cost_to_search(env, capsys):
+    conn, tmp_path = env
+
+    code, _, _ = run(["trip", "add", "Kelowna", "RNO", "YLW", "--depart", "2026-12-22", "--return", "2026-12-28",
+                      "--gateways", "SEA", "LAX", "PHX"], tmp_path)
+
+    out = capsys.readouterr().out
+    assert code == 0 and "Added trip 2: Kelowna, RNO > YLW, Dec 22 2026 - Dec 28 2026, priced in economy, premium economy and business." in out
+    assert "Gateways: LAX, PHX, SEA" in out and "Up to 14 Seats.aero searches per run" in out
+    assert "Evaluate it with: python -m flight_optimizer report" in out
+    assert [t["active"] for t in trip_rows(conn)] == [1, 1] and db.get_gateways(conn, 2) == ["LAX", "PHX", "SEA"]
+
+
+def test_a_trip_added_without_gateways_warns_that_only_the_direct_pair_is_searched(env, capsys):
+    _, tmp_path = env
+
+    run(["trip", "add", "Kelowna", "RNO", "YLW", "--depart", "2026-12-22", "--return", "2026-12-28"], tmp_path)
+
+    out = capsys.readouterr().out
+    assert "No gateways: only the direct RNO > YLW pair is searched" in out and "gateways 2 --add HUB" in out
+
+
+def test_a_one_way_or_inactive_trip(env, capsys):
+    conn, tmp_path = env
+
+    run(["trip", "add", "Later", "RNO", "YLW", "--depart", "2027-03-01", "--inactive"], tmp_path)
+
+    out = capsys.readouterr().out
+    assert "(one way), priced in" in out and "Saved inactive. Start searching it with: python -m flight_optimizer trip set 2 --active" in out
+    assert trip_rows(conn)[1]["active"] == 0
+
+
+@pytest.mark.parametrize("argv, message", [
+    (["trip", "add", "X", "RNO", "YLW", "--depart", "soon"], "should look like 2026-12-22"),
+    (["trip", "add", "X", "RNO", "RNO", "--depart", "2026-12-22"], "same airport"),
+    (["trip", "add", "X", "RNO", "YLW", "--depart", "2026-12-22", "--return", "2026-12-01"], "return date is before"),
+    (["trip", "add", "X", "RNO", "YLW", "--depart", "2026-12-22", "--gateways", "RNO"], "origin or destination"),
+    (["trip", "add", "Again", "RNO", "SJO", "--depart", "2027-01-09", "--return", "2027-01-16"], "already exists (trip 1)"),
+])
+def test_bad_trip_input_is_rejected_and_nothing_is_saved(env, capsys, argv, message):
+    conn, tmp_path = env
+
+    code, _, _ = run(argv, tmp_path)
+
+    assert code == 1 and message in capsys.readouterr().err
+    assert len(trip_rows(conn)) == 1
+
+
+def test_trip_add_needs_a_departure_date_and_has_no_cabin_option(env):
+    _, tmp_path = env
+
+    # Every trip is priced in every cabin, so there is nothing to choose.
+    for argv in (["trip", "add", "X", "RNO", "YLW"], ["trip", "add", "X", "RNO", "YLW", "--depart", "2026-12-22", "--cabin", "economy"]):
+        with pytest.raises(SystemExit) as excinfo:
+            run(argv, tmp_path)
+        assert excinfo.value.code == 2
+
+
+def test_trip_set_changes_and_shows_the_result(env, capsys):
+    conn, tmp_path = env
+
+    code, _, _ = run(["trip", "set", "1", "--name", "Costa Rica 2027"], tmp_path)
+
+    out = capsys.readouterr().out
+    assert code == 0 and "Updated." in out and "Costa Rica 2027" in out
+    assert trip_rows(conn)[0]["name"] == "Costa Rica 2027"
+
+
+def test_trip_set_can_pause_and_resume_a_trip(env):
+    conn, tmp_path = env
+
+    run(["trip", "set", "1", "--inactive"], tmp_path)
+    assert db.active_trips(conn) == []
+    run(["trip", "set", "1", "--active"], tmp_path)
+    assert len(db.active_trips(conn)) == 1
+
+
+def test_trip_set_can_drop_the_return_leg(env):
+    conn, tmp_path = env
+
+    run(["trip", "set", "1", "--one-way"], tmp_path)
+
+    assert trip_rows(conn)[0]["return_date"] is None
+
+
+def test_trip_set_with_nothing_to_change_says_so(env, capsys):
+    _, tmp_path = env
+
+    code, _, _ = run(["trip", "set", "1"], tmp_path)
+
+    assert code == 1 and "Nothing to change" in capsys.readouterr().out
+
+
+def test_trip_set_errors_are_clear(env, capsys):
+    conn, tmp_path = env
+
+    assert run(["trip", "set", "99", "--name", "x"], tmp_path)[0] == 1
+    assert "No trip with id 99" in capsys.readouterr().err
+    assert run(["trip", "set", "1", "--depart", "2027-06-01"], tmp_path)[0] == 1     # the return is Jan 16 2027
+    assert "return date is before" in capsys.readouterr().err
+    assert trip_rows(conn)[0]["depart_date"] == "2027-01-09"
+
+
+def test_active_and_inactive_cannot_both_be_given(env):
+    _, tmp_path = env
+
+    with pytest.raises(SystemExit) as excinfo:
+        run(["trip", "set", "1", "--active", "--inactive"], tmp_path)
+
+    assert excinfo.value.code == 2
+
+
+def test_trip_commands_need_no_api_clients(env):
+    _, tmp_path = env
+
+    def exploding_factory(settings, conn, fresh):
+        raise AssertionError("local commands must not build API clients")
+
+    assert main(["trip"], env_file=None, plans_dir=tmp_path / "plans", clients_factory=exploding_factory) == 0

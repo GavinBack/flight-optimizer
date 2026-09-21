@@ -12,6 +12,7 @@ from datetime import date, datetime, timedelta, timezone
 from flight_optimizer import db
 from flight_optimizer.analysis import TripAnalysis
 from flight_optimizer.buying import rank_buy_plans
+from flight_optimizer.cabins import cabin_label, compare_cabins
 from flight_optimizer.itineraries import STALE_AWARD_DAYS, Freshness
 from flight_optimizer.programs import PROGRAM_NAMES, STALE_AFTER_DAYS
 from flight_optimizer.promos import Promo
@@ -57,22 +58,21 @@ def _dates(trip: sqlite3.Row) -> str:
 
 
 def _alert_line(counts: dict[str, int]) -> str:
-    award, sale = counts.get("award", 0), counts.get("promo", 0)
-    if not award and not sale:
+    award, sale, upgrade = counts.get("award", 0), counts.get("promo", 0), counts.get("upgrade", 0)
+    if not award and not sale and not upgrade:
         return "Alerts sent in the last 7 days: none."
     parts = []
     if award:
         parts.append(f"{award} award")
     if sale:
         parts.append(f"{sale} sale")
+    if upgrade:
+        parts.append(f"{upgrade} better-cabin")
     return "Alerts sent in the last 7 days: " + ", ".join(parts) + "."
 
 
-def trip_section(
-    analysis: TripAnalysis, alert_counts: dict[str, int], promos: dict[str, Promo], today: date
-) -> list[str]:
-    trip = analysis.trip
-    lines = [f"{trip['name']}: {trip['origin']} > {trip['destination']}  {_dates(trip)}"]
+def _cabin_lines(analysis: TripAnalysis, promos: dict[str, Promo], today: date) -> list[str]:
+    lines = [f"-- {cabin_label(analysis.cabin)} --"]
 
     affordable = analysis.affordable
     if not affordable:
@@ -104,8 +104,6 @@ def trip_section(
                 "until Seats.aero refreshes it. That is silence, not an absence of options."
             )
 
-    lines.append(_alert_line(alert_counts))
-
     misses = [
         o for o in analysis.ranked
         if not o.affordability.affordable and o.freshness(today) is not Freshness.STALE
@@ -119,9 +117,37 @@ def trip_section(
             known = all(p.quote.tiers_known for p in plan.purchases if p.quote.kind != "retail")
             sale = " (a sale applies)" if known else " (a sale applies, best case: its tiers are unknown)"
         lines.append(f"Cheapest gap to close by buying: {what} miles, about ${plan.total_cost:,.2f}{sale}.")
+    return lines
 
-    if analysis.baseline is not None and analysis.baseline.fetched_at:
-        lines.append(f"Cash fares as of {analysis.baseline.fetched_at[:10]}.")
+
+def _upgrade_lines(analyses: list[TripAnalysis], today: date) -> list[str]:
+    comparison = compare_cabins(analyses, today)
+    cheapest = comparison.cheapest
+    if cheapest is None:
+        return ["Cabins: nothing priced yet."]
+    lines = [f"Cheapest way to fly: ${cheapest.best_cost:,.0f} ({cabin_label(cheapest.cabin)}, {cheapest.best_way})."]
+    for upgrade in comparison.upgrades:
+        lines.append(
+            f"Better cabin worth a look: {cabin_label(upgrade.outlook.cabin)} at ${upgrade.outlook.best_cost:,.0f} "
+            f"by {upgrade.outlook.best_way} (+${upgrade.extra:,.0f}, {upgrade.multiple:.2f}x)."
+        )
+    return lines
+
+
+def trip_section(
+    analyses: list[TripAnalysis], alert_counts: dict[str, int], promos: dict[str, Promo], today: date
+) -> list[str]:
+    """One trip's summary. `analyses` are that trip's per-cabin analyses."""
+    trip = analyses[0].trip
+    lines = [f"{trip['name']}: {trip['origin']} > {trip['destination']}  {_dates(trip)}"]
+    for analysis in analyses:
+        lines += _cabin_lines(analysis, promos, today)
+    lines += _upgrade_lines(analyses, today)
+    lines.append(_alert_line(alert_counts))
+
+    fetched = [a.baseline.fetched_at for a in analyses if a.baseline is not None and a.baseline.fetched_at]
+    if fetched:
+        lines.append(f"Cash fares as of {min(fetched)[:10]}.")
     return lines
 
 
@@ -151,22 +177,26 @@ def build_digest(
     balance_updates: dict[str, str],
     today: date,
 ) -> Digest:
-    lines: list[str] = []
+    trips: dict[int, list[TripAnalysis]] = {}
     for analysis in analyses:
+        trips.setdefault(analysis.trip["id"], []).append(analysis)
+
+    lines: list[str] = []
+    for trip_id, group in trips.items():
         if lines:
             lines.append("")
-        lines += trip_section(analysis, alert_counts.get(analysis.trip["id"], {}), promos, today)
+        lines += trip_section(group, alert_counts.get(trip_id, {}), promos, today)
     lines.append("")
     live = len(promos)
     lines.append(f"Buy-miles sales on record: {live}." if live else "No live buy-miles sales on record.")
     lines.append(balance_line(balances, balance_updates, today))
     lines.append("Full report: python -m flight_optimizer report")
 
-    names = ", ".join(a.trip["name"] for a in analyses)
-    title = f"Weekly flight check: {names}" if len(analyses) == 1 else f"Weekly flight check: {len(analyses)} trips"
+    names = ", ".join(group[0].trip["name"] for group in trips.values())
+    title = f"Weekly flight check: {names}" if len(trips) == 1 else f"Weekly flight check: {len(trips)} trips"
     return Digest(title=title, message="\n".join(lines))
 
 
 def alert_counts_for(conn: sqlite3.Connection, analyses: list[TripAnalysis], now: datetime) -> dict[int, dict[str, int]]:
     since = (now.astimezone(timezone.utc) - DIGEST_INTERVAL).strftime(_TIME_FORMAT)
-    return {a.trip["id"]: db.count_alerts_since(conn, a.trip["id"], since) for a in analyses}
+    return {a.trip["id"]: db.count_alerts_since(conn, a.trip["id"], since) for a in analyses}  # one entry per trip

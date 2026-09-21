@@ -5,7 +5,10 @@ from datetime import date
 
 from flight_optimizer import db
 from flight_optimizer.affordability import SOURCE_TO_PROGRAM, TripOption, slow_transfers
-from flight_optimizer.analysis import analyze_trip
+from flight_optimizer.analysis import analyze_trip_cabins
+from flight_optimizer.cabins import (
+    MILE_VALUE_CENTS, UPGRADE_MAX_MULTIPLE, CabinComparison, cabin_label, compare_cabins,
+)
 from flight_optimizer.buying import ESTIMATE_NOTE, BuyPlan, Purchase, rank_buy_plans
 from flight_optimizer.cash_fares import (
     DEFAULT_MAX_CACHE_AGE,
@@ -21,7 +24,7 @@ from flight_optimizer.itineraries import (
 )
 from flight_optimizer.promos import Promo, active_promos, best_promos
 from flight_optimizer.savings import TripBaseline, estimate_value
-from flight_optimizer.seats_aero import AwardResult, SeatsAeroClient
+from flight_optimizer.seats_aero import AwardResult, Cabin, SeatsAeroClient
 
 RULE = "=" * 78
 
@@ -233,8 +236,13 @@ def _booking_count(option: TripOption) -> int:
     return sum(len(it.legs) if it.self_transfers else 1 for it in option.itineraries)
 
 
+def _label_width(cabin: Cabin) -> int:
+    """Column width for a cabin name plus a space, so "premium economy" does not run into the fares."""
+    return max(9, len(cabin_label(cabin)) + 1)
+
+
 def _cash_ticket_lines(
-    baseline: TripBaseline | None, cabin: str, best_award: TripOption | None
+    baseline: TripBaseline | None, cabin: Cabin, best_award: TripOption | None
 ) -> list[str]:
     """The protected alternative: a cash ticket is one booking each way."""
     if baseline is None or baseline.cabin_total is None:
@@ -244,7 +252,7 @@ def _cash_ticket_lines(
     lines = [
         "",
         "CASH THROUGH-TICKET  (one booking each way: bags checked through, airline covers missed connections)",
-        f"  {cabin:<9}{fares}   TOTAL ${baseline.cabin_total:,}",
+        f"  {cabin_label(cabin):<{_label_width(cabin)}}{fares}   TOTAL ${baseline.cabin_total:,}",
     ]
     short = [
         f"{d} {_hm(m)}"
@@ -256,7 +264,7 @@ def _cash_ticket_lines(
         lines.append(
             f"  check: layover under {COMFORTABLE_CONNECTION_MINUTES / 60:g} hours: " + ", ".join(short)
         )
-    if baseline.economy_total is not None:
+    if cabin is not Cabin.ECONOMY and baseline.economy_total is not None:
         lines.append(f"  economy   TOTAL ${baseline.economy_total:,}")
     if best_award is not None:
         lines.append(
@@ -313,6 +321,45 @@ def _buy_lines(
     return lines
 
 
+def _money(amount: float | None) -> str:
+    return "-" if amount is None else f"${amount:,.0f}"
+
+
+def render_comparison(comparison: CabinComparison) -> str:
+    """One trip across cabins: what each costs by cash or affordable award, and any worthwhile upgrade."""
+    trip = comparison.trip
+    out = [RULE, f"{trip['name']}   {trip['origin']} > {trip['destination']}   CABINS AT A GLANCE", RULE, ""]
+    out.append(f"  {'cabin':<17}{'cash':>9}   {'affordable award':<34}{'cheapest way':>14}")
+    cheapest = comparison.cheapest
+    upgrades = {u.outlook.cabin: u for u in comparison.upgrades}
+    for o in comparison.outlooks:
+        if o.award is not None:
+            award = f"{o.award.total_miles:,} miles (~{_money(o.award_cost)})"
+        else:
+            award = "none you can afford" if o.offered else "none found"
+        way = "-" if o.best_cost is None else f"{_money(o.best_cost)} {o.best_way}"
+        line = f"  {cabin_label(o.cabin):<17}{_money(o.cash):>9}   {award:<34}{way:>14}"
+        if cheapest is not None and o.cabin is cheapest.cabin:
+            line += "   cheapest"
+        elif o.cabin in upgrades:
+            u = upgrades[o.cabin]
+            line += f"   +${u.extra:,.0f} ({u.multiple:.2f}x): UPGRADE OPPORTUNITY"
+        out.append(line)
+    if not any(o.offered for o in comparison.outlooks):
+        out.append("  Nothing priced in any cabin yet.")
+    out.append("")
+    out.append(
+        f"  Awards are costed at {MILE_VALUE_CENTS:g} cent per mile (assumed: Capital One's travel-eraser rate),"
+        " before taxes and fees."
+    )
+    out.append(
+        f"  A better cabin is flagged when it costs at most {UPGRADE_MAX_MULTIPLE:g}x the cheapest way to fly."
+        " Only awards you can afford on non-stale data count."
+    )
+    out.append("  Miles and status earned by a better cabin are not counted, so real upgrades cost less than shown.")
+    return "\n".join(out)
+
+
 def render_trip(
     trip: sqlite3.Row,
     gateways: list[str],
@@ -322,6 +369,7 @@ def render_trip(
     *,
     cash_note: str | None = None,
     stats: EnrichmentStats | None = None,
+    cabin: Cabin = Cabin.BUSINESS,
     top_n: int = 5,
     near_n: int = 3,
     buy_n: int = 3,
@@ -333,9 +381,9 @@ def render_trip(
     dates = f"{depart:%b %d %Y}"
     if trip["return_date"]:
         dates += f" - {date.fromisoformat(trip['return_date']):%b %d %Y}"
-    cabin = trip["cabin"].replace("_", " ")
+    cabin_name = cabin_label(cabin)
 
-    out = [RULE, f"{trip['name']}   {trip['origin']} > {trip['destination']}   {dates}   ({cabin})"]
+    out = [RULE, f"{trip['name']}   {trip['origin']} > {trip['destination']}   {dates}   ({cabin_name})"]
     out.append("Via gateways: " + (", ".join(gateways) if gateways else "none (direct pairs only)"))
     out.append(RULE)
 
@@ -348,14 +396,14 @@ def render_trip(
         out.append(f"  {cash_note or 'Cash prices unavailable.'}")
     else:
         directions = ["out", "ret"][: len(baseline.cabin_fares)]
-        for label, fares, total in (
-            (cabin, baseline.cabin_fares, baseline.cabin_total),
-            ("economy", baseline.economy_fares, baseline.economy_total),
-        ):
+        rows = [(cabin_name, baseline.cabin_fares, baseline.cabin_total)]
+        if cabin is not Cabin.ECONOMY:
+            rows.append(("economy", baseline.economy_fares, baseline.economy_total))
+        for label, fares, total in rows:
             legs = "   ".join(f"{d} {_fare_brief(f)}" for d, f in zip(directions, fares))
-            out.append(f"  {label:<9}{legs}" + (f"   TOTAL ${total:,}" if total is not None else ""))
-        if baseline.cabin_total is not None and baseline.economy_total is not None:
-            out.append(f"  {cabin} costs ${baseline.cabin_total - baseline.economy_total:,} more than economy")
+            out.append(f"  {label:<{_label_width(cabin)}}{legs}" + (f"   TOTAL ${total:,}" if total is not None else ""))
+        if cabin is not Cabin.ECONOMY and baseline.cabin_total is not None and baseline.economy_total is not None:
+            out.append(f"  {cabin_name} costs ${baseline.cabin_total - baseline.economy_total:,} more than economy")
         if baseline.fetched_at:
             out.append(f"  fares fetched {baseline.fetched_at[:10]} (refreshed once older than {DEFAULT_MAX_CACHE_AGE.days} days)")
 
@@ -379,8 +427,8 @@ def render_trip(
         if baseline is not None:
             value = estimate_value(option, baseline)
             if value.cents_per_mile_vs_cabin is not None:
-                head += f"   {value.cents_per_mile_vs_cabin:.2f} c/mile vs {cabin} cash"
-            if value.cents_per_mile_vs_economy is not None:
+                head += f"   {value.cents_per_mile_vs_cabin:.2f} c/mile vs {cabin_name} cash"
+            if cabin is not Cabin.ECONOMY and value.cents_per_mile_vs_economy is not None:
                 head += f"   {value.cents_per_mile_vs_economy:.2f} c/mile vs economy cash"
         head += f"   [{freshness_label(option, today)}]"
         out.append("")
@@ -425,14 +473,16 @@ def build_report(
     live_promos = best_promos(active_promos(conn, today or date.today()))
     sections = []
     for trip in trips:
-        analysis = analyze_trip(conn, awards, cash, trip, balances)
-        sections.append(
-            render_trip(
-                trip, analysis.gateways, analysis.ranked, analysis.baseline, balances,
-                cash_note=analysis.cash_note, stats=analysis.stats,
-                top_n=top_n, near_n=near_n, promos=live_promos, today=today,
+        analyses = analyze_trip_cabins(conn, awards, cash, trip, balances)
+        sections.append(render_comparison(compare_cabins(analyses, today or date.today())))
+        for analysis in analyses:
+            sections.append(
+                render_trip(
+                    trip, analysis.gateways, analysis.ranked, analysis.baseline, balances,
+                    cash_note=analysis.cash_note, stats=analysis.stats, cabin=analysis.cabin,
+                    top_n=top_n, near_n=near_n, promos=live_promos, today=today,
+                )
             )
-        )
 
     usage = []
     if awards.calls_remaining is not None:

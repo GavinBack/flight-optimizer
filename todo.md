@@ -122,7 +122,13 @@ Separate alert type. It depends on at least one active trip.
 
 ## 4. v2: multiple trips and price history
 
-- [ ] Support multiple saved trips at once
+- [x] Multiple saved trips (2026-09-21): `python -m flight_optimizer trip [list|add|set]` adds, lists and changes trips (validated: airport codes, dates, gateways, and duplicate routes are refused). The report, daily check and digest already loop over every active trip. Commands that need one trip ask which (`Say which trip: 1 (Costa Rica), 2 (Kelowna)`). Trip 2 added: Kelowna, RNO > YLW, Dec 22 to Dec 28 2026, gateways SEA, LAX, PHX.
+- [x] **Every trip is evaluated in economy, premium economy and business** (2026-09-21, owner's rule; the per-trip `--cabin` option is gone). Goals: 1. the best price and options for each trip; 2. notice when a better cabin becomes viable on cost. Built: one shared Seats.aero search per trip (no extra calls), per-cabin analysis, a "cabins at a glance" report section, per-cabin alerts and plans, a better-cabin alert for close cash fares, and a digest line. See CLAUDE.md for the design.
+  - [x] Mile value (`MILE_VALUE_CENTS`, 1.0) and upgrade multiple (`UPGRADE_MAX_MULTIPLE`, 1.5) accepted by the owner, 2026-09-21.
+  - [ ] **Earn and "gaming" model, on hold.** The owner's insight: a business fare earns miles faster, and miles can be traded, so business can cost less than its listing. The owner is not chasing a specific program now and will research that separately (the Capital One card is for flexibility, e.g. an urgent UK trip), so no per-program earn-rate research yet. When a program is chosen: subtract the value of the miles and status a cabin earns from its cost, using only legitimate earn and redemption effects.
+  - [ ] Capital One is a flexibility reserve (e.g. an urgent UK trip). When joint evaluation is built, consider showing how much of the pool an option leaves untouched.
+  - [ ] Premium economy is thin: no premium economy award space was found through LAX for either trip, and Google returned no premium economy cash fares for RNO to SJO. Worth checking whether that changes closer to the dates.
+  - [ ] SerpApi budget: three cabins take a round-trip trip to about 90 searches a month, so two trips use about 180 of the 250 free. A third trip would exceed it: lengthen the cache age or drop premium economy cash searches for it.
 - [ ] Store historical price and availability snapshots
 - [ ] Use history to tune thresholds. The README notes dynamic award pricing means thresholds need periodic re-tuning.
 
@@ -145,7 +151,10 @@ Nice-to-haves once the core alerting works. Item 7.3 overlaps with section 5 (v3
   - [ ] Send only the top N options plus balances, cash prices and savings, to keep each call small.
   - [ ] Add `ANTHROPIC_API_KEY` to `.env` and `.env.example`. This is pay-per-use API billing (no subscription), so estimate the monthly cost first.
   - [ ] Have it flag risks the data can't settle, such as unverified connection times, cached data age, and irreversible Capital One transfers.
-- [ ] **Two trips at a time.** Let two active trips be entered and planned together, finding ways to optimize total cost across both.
+- [ ] **Two trips at a time.** Started: each active trip is now evaluated on its own against the SAME balances. NOT done: nothing yet checks the trips against each other, so both could be recommended options that together need more Capital One miles than exist (Costa Rica's best already moves 79,000 of the 115,519).
+  - Kelowna finding (2026-09-21): no direct RNO-YLW award route exists; SEA, LAX and PHX connect both ends. **Zero affordable award options.** The space is almost all Alaska, which needs Atmos points you do not have and Capital One cannot supply; the cheapest gaps to close are thousands of dollars (a 1-hour hop at 27,500 to 35,000 miles a leg). The cash through-ticket is the realistic option ($1,067 economy, $1,809 business, holiday fares). Economy awards are cheap in miles (RNO>SEA from 5,000) but roughly 70,000 Atmos points for the round trip would cost far more to buy than the cash fare (rough, from retail estimates).
+  - [ ] The trip dates were given as approximate ("~"). Dates are exact today: a flexible window (e.g. plus or minus 2 days, searching each day) is not modeled and could turn up space on neighboring days.
+  - [ ] Joint evaluation: rank pairs of options (one per trip) against the shared balances, and warn when each trip's best option is affordable alone but the two together are not. `affordability.assess` already takes several itineraries.
   - [ ] Share balances across trips: the same Capital One pool and per-program balances must cover both. `affordability.assess` already takes several itineraries, so extend it to pairs of trip options.
   - [ ] Choose the objective: fewest total miles, most total savings, or least cash spent.
   - [ ] Prune to the top K options per trip before combining, since 4,000+ options per trip multiplies out quickly.

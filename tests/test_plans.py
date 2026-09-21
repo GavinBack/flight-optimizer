@@ -147,9 +147,22 @@ def test_save_plan_writes_a_named_file_and_latest_plan_finds_the_newest(conn, tm
     first = save_plan(text, trip, generated_at=datetime(2026, 9, 20, 14, 5), directory=tmp_path / "plans")
     second = save_plan(text + "\nnewer", trip, generated_at=datetime(2026, 9, 21, 9, 30), directory=tmp_path / "plans")
 
-    assert first.name == "1-costa-rica-20260920-1405.txt"
+    assert first.name == "1-costa-rica-business-20260920-1405.txt"
     assert first.read_text().startswith("BOOKING PLAN")
     assert latest_plan(trip["id"], tmp_path / "plans") == second
+
+
+def test_plans_are_kept_per_cabin_and_the_newest_wins_whatever_its_cabin(conn, tmp_path):
+    from flight_optimizer.seats_aero import Cabin
+
+    trip, text = plan_for(conn)
+    directory = tmp_path / "plans"
+    business = save_plan(text, trip, generated_at=datetime(2026, 9, 20, 14, 5), cabin=Cabin.BUSINESS, directory=directory)
+    economy = save_plan(text, trip, generated_at=datetime(2026, 9, 21, 9, 30), cabin=Cabin.ECONOMY, directory=directory)
+
+    assert latest_plan(trip["id"], directory) == economy      # newest overall, though "economy" sorts first
+    assert latest_plan(trip["id"], directory, Cabin.BUSINESS) == business
+    assert latest_plan(trip["id"], directory, Cabin.PREMIUM_ECONOMY) is None
 
 
 def test_latest_plan_is_none_when_nothing_was_saved(tmp_path):

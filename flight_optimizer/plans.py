@@ -13,9 +13,11 @@ from flight_optimizer.affordability import (
 )
 from flight_optimizer.alerts import Urgency, assess_urgency, heads_up, oldest_data, option_key, option_legs
 from flight_optimizer.analysis import TripAnalysis
+from flight_optimizer.cabins import cabin_label
 from flight_optimizer.programs import PROGRAM_NAMES
 from flight_optimizer.report import freshness_label
 from flight_optimizer.savings import estimate_value
+from flight_optimizer.seats_aero import Cabin
 
 DEFAULT_DIRECTORY = Path("plans")
 
@@ -52,7 +54,7 @@ def render_plan(
 ) -> str:
     trip = analysis.trip
     urgency = urgency or assess_urgency(option)
-    cabin = trip["cabin"].replace("_", " ")
+    cabin = cabin_label(analysis.cabin)
     depart = date.fromisoformat(trip["depart_date"])
     dates = f"{depart:%b %d %Y}"
     if trip["return_date"]:
@@ -75,7 +77,7 @@ def render_plan(
             headline += (
                 f", {value.cents_per_mile_vs_cabin:.2f} c/mile vs {cabin} cash ${value.cabin_cash:,}"
             )
-        if value.cents_per_mile_vs_economy is not None:
+        if analysis.cabin is not Cabin.ECONOMY and value.cents_per_mile_vs_economy is not None:
             headline += f" ({value.cents_per_mile_vs_economy:.2f} vs economy cash ${value.economy_cash:,})"
     out.append(headline)
     bookings = sum(len(it.legs) if it.self_transfers else 1 for it in option.itineraries)
@@ -171,7 +173,10 @@ def render_plan(
             "",
             "CASH ALTERNATIVE  (one booking each way: bags checked through, airline covers missed connections)",
             f"  {cabin}: ${baseline.cabin_total:,} round trip"
-            + (f"   economy: ${baseline.economy_total:,}" if baseline.economy_total is not None else ""),
+            + (
+                f"   economy: ${baseline.economy_total:,}"
+                if analysis.cabin is not Cabin.ECONOMY and baseline.economy_total is not None else ""
+            ),
         ]
 
     out += [
@@ -188,16 +193,20 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-") or "trip"
 
 
-def save_plan(text: str, trip: sqlite3.Row, *, generated_at: datetime, directory: Path = DEFAULT_DIRECTORY) -> Path:
+def save_plan(
+    text: str, trip: sqlite3.Row, *, generated_at: datetime, cabin: Cabin = Cabin.BUSINESS,
+    directory: Path = DEFAULT_DIRECTORY,
+) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{trip['id']}-{_slug(trip['name'])}-{generated_at:%Y%m%d-%H%M}.txt"
+    path = directory / f"{trip['id']}-{_slug(trip['name'])}-{cabin.name.lower()}-{generated_at:%Y%m%d-%H%M}.txt"
     path.write_text(text + "\n")
     return path
 
 
-def latest_plan(trip_id: int, directory: Path = DEFAULT_DIRECTORY) -> Path | None:
-    """The most recently saved plan for a trip, or None."""
+def latest_plan(trip_id: int, directory: Path = DEFAULT_DIRECTORY, cabin: Cabin | None = None) -> Path | None:
+    """The most recently saved plan for a trip (in `cabin`, if given), or None."""
     if not directory.exists():
         return None
-    matches = sorted(directory.glob(f"{trip_id}-*.txt"))
+    pattern = f"{trip_id}-*-{cabin.name.lower()}-*.txt" if cabin else f"{trip_id}-*.txt"
+    matches = sorted(directory.glob(pattern), key=lambda path: path.stem[-13:])  # names end in YYYYMMDD-HHMM
     return matches[-1] if matches else None

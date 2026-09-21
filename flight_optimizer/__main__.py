@@ -5,6 +5,7 @@
     python -m flight_optimizer plan [TRIP] [--refresh]   show the booking plan
     python -m flight_optimizer done TRIP            mark a trip booked (stops alerts)
     python -m flight_optimizer test-notification    check that ntfy reaches your phone
+    python -m flight_optimizer trip [list|add|set]   see, add or change trips
     python -m flight_optimizer balance [PROGRAM MILES ...]   show balances, or set them
     python -m flight_optimizer gateways [TRIP] [--set|--add|--remove AIRPORT ...]   show or change hubs
     python -m flight_optimizer digest [--dry-run]   send (or preview) the weekly digest now
@@ -23,20 +24,24 @@ from pathlib import Path
 
 from flight_optimizer import db
 from flight_optimizer.alerts import (
-    assess_urgency, decide_alert, decide_promo_alert, record_promo_sent, record_sent, usable_for_alert,
+    assess_urgency, decide_alert, decide_promo_alert, decide_upgrade_alert, record_promo_sent, record_sent,
+    record_upgrade_sent, usable_for_alert,
 )
-from flight_optimizer.analysis import analyze_trip
+from flight_optimizer.analysis import analyze_trip_cabins
+from flight_optimizer.cabins import MILE_VALUE_CENTS, cabin_label
 from flight_optimizer.cash_fares import SerpApiClient
 from flight_optimizer.config import ConfigError, Settings, load_settings
 from flight_optimizer.digest import alert_counts_for, build_digest, digest_due, record_digest_sent
-from flight_optimizer.itineraries import STALE_AWARD_DAYS
+from flight_optimizer.itineraries import EVALUATED_CABINS, STALE_AWARD_DAYS, Freshness
 from flight_optimizer.notify import NtfyClient, NtfyError
 from flight_optimizer.plans import latest_plan, render_plan, save_plan
+from flight_optimizer.seats_aero import Cabin
 from flight_optimizer.promos import (
     Promo, PromoSource, PromoTier, active_promos, best_promos, refresh_promos, save_promo,
 )
 from flight_optimizer.buying import RETAIL_PRICES
 from flight_optimizer.programs import PROGRAM_NAMES, format_balances, parse_miles, resolve_program
+from flight_optimizer.trips import add_trip, format_trips, parse_date
 from flight_optimizer.report import build_report
 from flight_optimizer.seats_aero import SeatsAeroClient, SeatsAeroError
 from flight_optimizer.seats_cache import CachedSeatsAero
@@ -84,6 +89,8 @@ def _build_parser() -> argparse.ArgumentParser:
     plan = commands.add_parser("plan", help="show the saved booking plan for a trip")
     plan.add_argument("trip_id", nargs="?", type=int)
     plan.add_argument("--refresh", action="store_true", help="search again and rebuild the plan first")
+    plan.add_argument("--cabin", choices=[c.name.lower() for c in EVALUATED_CABINS],
+                      help="only this cabin (default: the latest saved plan, or with --refresh one per cabin)")
 
     done = commands.add_parser("done", help="mark a trip booked, so it stops being searched and alerted on")
     done.add_argument("trip_id", type=int)
@@ -108,6 +115,28 @@ def _build_parser() -> argparse.ArgumentParser:
     add.add_argument("--url", default="", help="the sale's page, opened when you tap an alert")
     remove = actions.add_parser("remove", help="remove the sales you added by hand for a program")
     remove.add_argument("program")
+
+    trip = commands.add_parser("trip", help="list, add, or change trips")
+    trip_actions = trip.add_subparsers(dest="trip_action")
+    trip_actions.add_parser("list", help="show every trip (the default)")
+    add_trip_parser = trip_actions.add_parser("add", help="add a trip; it is evaluated by the next report and daily check")
+    add_trip_parser.add_argument("name")
+    add_trip_parser.add_argument("origin", help="airport code, e.g. RNO")
+    add_trip_parser.add_argument("destination", help="airport code, e.g. YLW")
+    add_trip_parser.add_argument("--depart", required=True, metavar="YYYY-MM-DD")
+    add_trip_parser.add_argument("--return", dest="return_date", metavar="YYYY-MM-DD", help="omit for a one-way trip")
+    add_trip_parser.add_argument("--gateways", nargs="+", default=[], metavar="AIRPORT",
+                                 help="hub airports to route through when origin and destination have no direct award route")
+    add_trip_parser.add_argument("--inactive", action="store_true", help="save it without searching or alerting on it yet")
+    set_trip = trip_actions.add_parser("set", help="change a trip's name, dates, or whether it is active")
+    set_trip.add_argument("trip_id", type=int)
+    set_trip.add_argument("--name")
+    set_trip.add_argument("--depart", metavar="YYYY-MM-DD")
+    set_trip.add_argument("--return", dest="return_date", metavar="YYYY-MM-DD")
+    set_trip.add_argument("--one-way", action="store_true", help="drop the return leg")
+    state = set_trip.add_mutually_exclusive_group()
+    state.add_argument("--active", action="store_true", help="search and alert on this trip")
+    state.add_argument("--inactive", action="store_true", help="stop searching and alerting on this trip")
 
     balance = commands.add_parser(
         "balance", help="show your balances, or set them: balance PROGRAM MILES [PROGRAM MILES ...]"
@@ -170,36 +199,20 @@ def _run_notify(conn, clients: Clients, plans_dir: Path, *, dry_run: bool, now: 
     failed = False
     analyses = []
     for trip in trips:
-        analysis = analyze_trip(conn, clients.awards, clients.cash, trip, balances)
-        analyses.append(analysis)
+        trip_analyses = analyze_trip_cabins(conn, clients.awards, clients.cash, trip, balances)
+        analyses += trip_analyses
 
-        alert = decide_alert(conn, analysis, now=now)
-        if alert is None:
-            if analysis.affordable and not usable_for_alert(analysis, now.date()):
-                print(
-                    f"{trip['name']}: affordable options exist, but every one relies on award data older "
-                    f"than {STALE_AWARD_DAYS} days, so no alert was sent. Run the report to see them."
-                )
-            else:
-                print(f"{trip['name']}: nothing new to alert on.")
-        elif dry_run:
-            _send(conn, clients, trip, alert, dry_run=True, describe="award alert")
-        else:
-            # Save the plan first, so the alert's "full steps" pointer is always valid.
-            plan_text = render_plan(analysis, alert.option, balances=balances, generated_at=now, urgency=alert.urgency)
-            path = save_plan(plan_text, trip, generated_at=now, directory=plans_dir)
-            if _send(conn, clients, trip, alert, dry_run=False, describe="award alert"):
-                record_sent(conn, alert, str(path))
-                print(f"{trip['name']}: alert sent ({alert.urgency.label}). Plan saved to {path}")
-            else:
-                failed = True
+        for analysis in trip_analyses:
+            failed |= _alerts_for(
+                conn, clients, plans_dir, analysis, live_promos, balances, now, dry_run=dry_run
+            )
 
-        promo_alert = decide_promo_alert(conn, analysis, live_promos, now=now)
-        if promo_alert is not None:
-            if _send(conn, clients, trip, promo_alert, dry_run=dry_run, describe="sale alert"):
+        upgrade_alert = decide_upgrade_alert(conn, trip_analyses, now=now)
+        if upgrade_alert is not None:
+            if _send(conn, clients, trip, upgrade_alert, dry_run=dry_run, describe="better-cabin alert"):
                 if not dry_run:
-                    record_promo_sent(conn, promo_alert)
-                    print(f"{trip['name']}: sale alert sent ({promo_alert.title}).")
+                    record_upgrade_sent(conn, upgrade_alert)
+                    print(f"{trip['name']}: better-cabin alert sent ({upgrade_alert.title}).")
             else:
                 failed = True
 
@@ -208,6 +221,49 @@ def _run_notify(conn, clients: Clients, plans_dir: Path, *, dry_run: bool, now: 
     ):
         failed = True
     return 1 if failed else 0
+
+
+def _alerts_for(conn, clients: Clients, plans_dir: Path, analysis, live_promos, balances, now: datetime, *, dry_run: bool) -> bool:
+    """Award and sale alerts for one trip in one cabin. True if any could not be delivered."""
+    trip, failed = analysis.trip, False
+    label = f"{trip['name']} ({cabin_label(analysis.cabin)})"
+
+    alert = decide_alert(conn, analysis, now=now)
+    if alert is None:
+        current = [o for o in analysis.affordable if o.freshness(now.date()) is not Freshness.STALE]
+        if analysis.affordable and not current:
+            print(
+                f"{label}: affordable options exist, but every one relies on award data older "
+                f"than {STALE_AWARD_DAYS} days, so no alert was sent. Run the report to see them."
+            )
+        elif current and not usable_for_alert(analysis, now.date()):
+            print(
+                f"{label}: affordable options exist, but their miles are worth less than the cash fare "
+                f"(under {MILE_VALUE_CENTS:g} cent a mile), so no alert was sent. Run the report to see them."
+            )
+        else:
+            print(f"{label}: nothing new to alert on.")
+    elif dry_run:
+        _send(conn, clients, trip, alert, dry_run=True, describe="award alert")
+    else:
+        # Save the plan first, so the alert's "full steps" pointer is always valid.
+        plan_text = render_plan(analysis, alert.option, balances=balances, generated_at=now, urgency=alert.urgency)
+        path = save_plan(plan_text, trip, generated_at=now, cabin=analysis.cabin, directory=plans_dir)
+        if _send(conn, clients, trip, alert, dry_run=False, describe="award alert"):
+            record_sent(conn, alert, str(path))
+            print(f"{label}: alert sent ({alert.urgency.label}). Plan saved to {path}")
+        else:
+            failed = True
+
+    promo_alert = decide_promo_alert(conn, analysis, live_promos, now=now)
+    if promo_alert is not None:
+        if _send(conn, clients, trip, promo_alert, dry_run=dry_run, describe="sale alert"):
+            if not dry_run:
+                record_promo_sent(conn, promo_alert)
+                print(f"{label}: sale alert sent ({promo_alert.title}).")
+        else:
+            failed = True
+    return failed
 
 
 def _send_digest(conn, clients: Clients, analyses, live_promos, balances, now: datetime, *, dry_run: bool) -> bool:
@@ -240,27 +296,32 @@ def _run_digest(conn, clients: Clients, now: datetime, *, dry_run: bool) -> int:
         for problem in refresh_promos(conn, clients.promos, now).errors:
             print(f"note: could not read a sales source: {problem}", file=sys.stderr)
     balances = db.get_balances(conn)
-    analyses = [analyze_trip(conn, clients.awards, clients.cash, trip, balances) for trip in trips]
+    analyses = [a for trip in trips for a in analyze_trip_cabins(conn, clients.awards, clients.cash, trip, balances)]
     live_promos = best_promos(active_promos(conn, now.date()))
     return 0 if _send_digest(conn, clients, analyses, live_promos, balances, now, dry_run=dry_run) else 1
 
 
 def _run_plan(conn, clients: Clients, plans_dir: Path, args, now: datetime) -> int:
     trip = _pick_trip(conn, args.trip_id)
+    cabin = Cabin[args.cabin.upper()] if args.cabin else None
     if args.refresh:
         balances = db.get_balances(conn)
-        analysis = analyze_trip(conn, clients.awards, clients.cash, trip, balances)
-        if not analysis.affordable:
-            print(f"{trip['name']}: no affordable option right now, so there is no plan to build.")
-            return 0
-        best = analysis.affordable[0]
-        text = render_plan(analysis, best, balances=balances, generated_at=now, urgency=assess_urgency(best))
-        path = save_plan(text, trip, generated_at=now, directory=plans_dir)
-        print(f"Plan saved to {path}\n")
-        print(text)
+        analyses = analyze_trip_cabins(
+            conn, clients.awards, clients.cash, trip, balances,
+            cabins=(cabin,) if cabin else EVALUATED_CABINS,
+        )
+        for analysis in analyses:
+            if not analysis.affordable:
+                print(f"{trip['name']} ({cabin_label(analysis.cabin)}): no affordable option right now, so there is no plan to build.")
+                continue
+            best = analysis.affordable[0]
+            text = render_plan(analysis, best, balances=balances, generated_at=now, urgency=assess_urgency(best))
+            path = save_plan(text, trip, generated_at=now, cabin=analysis.cabin, directory=plans_dir)
+            print(f"Plan saved to {path}\n")
+            print(text)
         return 0
 
-    path = latest_plan(trip["id"], plans_dir)
+    path = latest_plan(trip["id"], plans_dir, cabin)
     if path is None:
         print(
             f"No saved plan for {trip['name']}. Plans are saved when an alert is sent, or run:\n"
@@ -269,6 +330,52 @@ def _run_plan(conn, clients: Clients, plans_dir: Path, args, now: datetime) -> i
         return 1
     print(f"Plan file: {path}\n")
     print(path.read_text())
+    return 0
+
+
+def _run_trip(conn, args) -> int:
+    action = getattr(args, "trip_action", None)
+    if action in (None, "list"):
+        print(format_trips(conn))
+        return 0
+
+    if action == "add":
+        depart = parse_date(args.depart, "--depart")
+        return_date = parse_date(args.return_date, "--return") if args.return_date else None
+        trip_id = add_trip(
+            conn, name=args.name, origin=args.origin, destination=args.destination, depart_date=depart,
+            return_date=return_date, gateways=args.gateways, active=not args.inactive,
+        )
+        trip = conn.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
+        gateways = db.get_gateways(conn, trip_id)
+        print(f"Added trip {trip_id}: {trip['name']}, {trip['origin']} > {trip['destination']}, "
+              f"{depart:%b %d %Y}" + (f" - {return_date:%b %d %Y}" if return_date else " (one way)")
+              + ", priced in economy, premium economy and business.")
+        print(f"Gateways: {', '.join(gateways) if gateways else 'none'}")
+        if not gateways:
+            print(f"No gateways: only the direct {trip['origin']} > {trip['destination']} pair is searched, "
+                  "which often returns nothing. Add hubs with: python -m flight_optimizer gateways "
+                  f"{trip_id} --add HUB ...")
+        print(_gateway_cost(trip, gateways))
+        print("Evaluate it with: python -m flight_optimizer report" if trip["active"]
+              else f"Saved inactive. Start searching it with: python -m flight_optimizer trip set {trip_id} --active")
+        return 0
+
+    trip = _pick_trip(conn, args.trip_id)
+    active = True if args.active else False if args.inactive else None
+    changes = dict(
+        name=args.name,
+        depart_date=parse_date(args.depart, "--depart") if args.depart else None,
+        return_date=parse_date(args.return_date, "--return") if args.return_date else None,
+        one_way=args.one_way, active=active,
+    )
+    given = (args.name, args.depart, args.return_date, args.one_way, args.active, args.inactive)
+    if not any(given):   # judged from what was typed: --inactive means "change it", though its value is False
+        print("Nothing to change: give at least one of --name, --depart, --return, --one-way, --active, --inactive.")
+        return 1
+    db.update_trip(conn, trip["id"], **changes)
+    print("Updated.\n")
+    print(format_trips(conn))
     return 0
 
 
@@ -444,9 +551,10 @@ def main(
     fresh = args.fresh or getattr(args, "refresh", False)  # a refreshed plan must be fresh
 
     # Local-only commands: no API clients needed.
-    if args.command in ("balance", "gateways"):
+    if args.command in ("balance", "gateways", "trip"):
         try:
-            return _run_balance(conn, args) if args.command == "balance" else _run_gateways(conn, args)
+            handler = {"balance": _run_balance, "gateways": _run_gateways, "trip": _run_trip}[args.command]
+            return handler(conn, args)
         except (ValueError, LookupError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1

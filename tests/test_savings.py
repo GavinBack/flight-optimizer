@@ -95,7 +95,7 @@ def test_trip_baseline_applies_the_layover_rule_per_direction_and_cabin(conn):
         ("SJO", "RNO", Cabin.ECONOMY): [fare(300, (90,), 650)],
     })
 
-    baseline = trip_baseline(conn, client, add_trip(conn))
+    baseline = trip_baseline(conn, client, add_trip(conn), cabin=Cabin.BUSINESS)
 
     assert baseline.cabin_total == 1505 + 1400
     assert baseline.economy_total == 323 + 300
@@ -108,7 +108,7 @@ def test_one_way_trip_only_searches_one_direction(conn):
         ("RNO", "SJO", Cabin.ECONOMY): [fare(323)],
     })
 
-    baseline = trip_baseline(conn, client, add_trip(conn, return_date=None))
+    baseline = trip_baseline(conn, client, add_trip(conn, return_date=None), cabin=Cabin.BUSINESS)
 
     assert len(baseline.cabin_fares) == 1 and baseline.cabin_total == 1505
     assert len(client.calls) == 2
@@ -121,8 +121,8 @@ def test_trip_baseline_reuses_the_cache_on_a_second_call(conn):
     })
     trip = add_trip(conn, return_date=None)
 
-    trip_baseline(conn, client, trip)
-    trip_baseline(conn, client, trip)
+    trip_baseline(conn, client, trip, cabin=Cabin.BUSINESS)
+    trip_baseline(conn, client, trip, cabin=Cabin.BUSINESS)
 
     assert len(client.calls) == 2
 
@@ -138,7 +138,7 @@ def test_the_baseline_records_the_age_of_its_oldest_search(conn):
                        typical_high=None, fetched_at=older)
     client = RecordingClient({("RNO", "SJO", Cabin.ECONOMY): [fare(323)]})
 
-    baseline = trip_baseline(conn, client, add_trip(conn, return_date=None))
+    baseline = trip_baseline(conn, client, add_trip(conn, return_date=None), cabin=Cabin.BUSINESS)
 
     assert baseline.fetched_at == older  # the cached business search is the older of the two
     assert [c[3] for c in client.calls] == [Cabin.ECONOMY]  # and it was reused, not re-searched
@@ -146,3 +146,23 @@ def test_the_baseline_records_the_age_of_its_oldest_search(conn):
 
 def test_a_baseline_built_by_hand_has_no_fetch_time():
     assert TripBaseline(cabin_fares=(None,), economy_fares=(None,)).fetched_at is None
+
+
+def test_an_economy_baseline_searches_economy_once_and_uses_it_for_both_figures(conn):
+    client = RecordingClient({("RNO", "SJO", Cabin.ECONOMY): [fare(323)]})
+
+    baseline = trip_baseline(conn, client, add_trip(conn, return_date=None), cabin=Cabin.ECONOMY)
+
+    assert baseline.cabin_total == baseline.economy_total == 323
+    assert len(client.calls) == 1
+
+
+def test_premium_economy_is_priced_in_its_own_cabin(conn):
+    client = RecordingClient({
+        ("RNO", "SJO", Cabin.PREMIUM_ECONOMY): [fare(640)],
+        ("RNO", "SJO", Cabin.ECONOMY): [fare(323)],
+    })
+
+    baseline = trip_baseline(conn, client, add_trip(conn, return_date=None), cabin=Cabin.PREMIUM_ECONOMY)
+
+    assert (baseline.cabin_total, baseline.economy_total) == (640, 323)

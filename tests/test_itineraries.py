@@ -11,6 +11,7 @@ from flight_optimizer.itineraries import (
     search_active_trips,
     search_one_way,
     search_trip,
+    search_trip_cabins,
 )
 from flight_optimizer.seats_aero import AwardResult, Cabin
 
@@ -198,7 +199,7 @@ def test_search_trip_searches_outbound_and_return_legs(conn):
     })
     trip = conn.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
 
-    result = search_trip(client, trip, ["LAX"])
+    result = search_trip(client, trip, ["LAX"], cabin=Cabin.BUSINESS)
 
     assert [i.total_miles for i in result.outbound] == [35_000]
     assert [i.total_miles for i in result.return_trip] == [37_000]
@@ -208,7 +209,7 @@ def test_one_way_trip_has_no_return_search(conn):
     trip_id = add_trip(conn, return_date=None)
     trip = conn.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
 
-    result = search_trip(FakeClient({}), trip, [])
+    result = search_trip(FakeClient({}), trip, [], cabin=Cabin.BUSINESS)
 
     assert result.return_trip is None
 
@@ -222,9 +223,44 @@ def test_search_active_trips_skips_inactive_trips(conn):
     results = search_active_trips(conn, client)
 
     assert list(results) == [active_id]
+    assert set(results[active_id]) == {Cabin.ECONOMY, Cabin.PREMIUM_ECONOMY, Cabin.BUSINESS}
     assert inactive_id not in results
     # The inactive trip's searches never happened.
     assert client.calls and all(call[2] in (JAN9, JAN16) for call in client.calls)
+
+
+# --- one search, every cabin ------------------------------------------------------------
+
+def test_every_cabin_is_found_from_one_set_of_searches(conn):
+    trip_id = add_trip(conn)
+    trip = conn.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
+    client = FakeClient({
+        ("RNO", "LAX"): [
+            award("RNO", "LAX", JAN9, 8_000, cabin=Cabin.ECONOMY),
+            award("RNO", "LAX", JAN9, 12_000, cabin=Cabin.PREMIUM_ECONOMY),
+            award("RNO", "LAX", JAN9, 25_000, cabin=Cabin.BUSINESS),
+        ],
+        ("LAX", "SJO"): [
+            award("LAX", "SJO", JAN9, 15_000, cabin=Cabin.ECONOMY),
+            award("LAX", "SJO", JAN9, 60_000, cabin=Cabin.BUSINESS),
+        ],
+    })
+
+    found = search_trip_cabins(client, trip, ["LAX"])
+
+    assert [i.total_miles for i in found[Cabin.ECONOMY].outbound] == [23_000]
+    assert found[Cabin.PREMIUM_ECONOMY].outbound == []  # no premium-economy second leg
+    assert [i.total_miles for i in found[Cabin.BUSINESS].outbound] == [85_000]
+    # Three cabins cost what one did: no search is repeated.
+    assert len(client.calls) == len(set(client.calls)) == 5
+
+
+def test_cabins_can_be_narrowed(conn):
+    trip = conn.execute("SELECT * FROM trips WHERE id = ?", (add_trip(conn),)).fetchone()
+
+    found = search_trip_cabins(FakeClient({}), trip, [], cabins=(Cabin.BUSINESS,))
+
+    assert list(found) == [Cabin.BUSINESS]
 
 
 # --- stops inside hub legs, and stale award data ---------------------------------------

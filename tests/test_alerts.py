@@ -7,8 +7,12 @@ from builders import (
 )
 from flight_optimizer import db
 from flight_optimizer.alerts import (
-    RE_ALERT_DAYS, assess_urgency, build_alert, decide_alert, option_key, record_sent, usable_for_alert,
+    RE_ALERT_DAYS, assess_urgency, build_alert, decide_alert, decide_upgrade_alert, option_key, record_sent,
+    record_upgrade_sent, usable_for_alert,
 )
+from flight_optimizer.savings import TripBaseline
+from flight_optimizer.seats_aero import Cabin
+from builders import fare
 
 
 @pytest.fixture
@@ -48,6 +52,24 @@ def test_option_key_identifies_flights_not_prices():
     assert option_key(good_option()) != option_key(good_option(flights=("UA2", "AV641", "AV654", "DL9")))
 
 
+def test_option_key_separates_cabins_so_one_alert_does_not_silence_another():
+    from dataclasses import replace
+    from flight_optimizer.itineraries import Itinerary
+    from flight_optimizer.affordability import TripOption
+    from flight_optimizer.seats_aero import Cabin
+
+    business = good_option()
+    economy = TripOption(
+        itineraries=tuple(
+            Itinerary(legs=tuple(replace(l, cabin=Cabin.ECONOMY) for l in it.legs), via=it.via)
+            for it in business.itineraries
+        ),
+        affordability=business.affordability,
+    )
+
+    assert option_key(business) != option_key(economy)
+
+
 def alert_for(conn, options, **kwargs):
     trip = add_trip(conn)
     analysis = analysis_for(trip, options, **kwargs)
@@ -58,11 +80,11 @@ def test_the_message_is_a_short_summary_with_urgency_and_a_pointer_to_the_plan(c
     trip, analysis, alert = alert_for(conn, [good_option(seats=1)])
 
     lines = alert.message.split("\n")
-    assert lines[0] == "RNO > SJO  Jan 09 - Jan 16"
+    assert lines[0] == "RNO > SJO  Jan 09 - Jan 16  (business)"
     assert lines[1] == "71,800 miles (3.2 c/mile vs $2,267 business cash)"
     assert lines[2] == "ACT TODAY: RNO>LAX delta has 1 seat left"
     assert "Full steps: python -m flight_optimizer plan 1" in lines[-1]
-    assert alert.title == "Costa Rica: 71,800 miles"
+    assert alert.title == "Costa Rica (business): 71,800 miles"
     assert len(alert.message) < 600
 
 
@@ -358,7 +380,7 @@ def test_a_known_tier_sale_under_the_threshold_makes_an_alert(conn):
     _, _, alert = promo_alert_for(conn, [gap_option()], {"delta": delta_sale()})
 
     assert alert is not None
-    assert alert.title == "Costa Rica: delta sale closes a gap"
+    assert alert.title == "Costa Rica (business): delta sale closes a gap"
     assert alert.plan.total_cost == 75.25 and alert.plan.retail_cost == 150.50
 
 
@@ -366,7 +388,7 @@ def test_the_alert_message_states_the_deal_the_total_and_what_retail_would_cost(
     _, _, alert = promo_alert_for(conn, [gap_option()], {"delta": delta_sale()})
 
     lines = alert.message.split("\n")
-    assert lines[0] == "RNO > SJO  Jan 09 - Jan 16"
+    assert lines[0] == "RNO > SJO  Jan 09 - Jan 16  (business)"
     assert "A delta sale makes a 76,700-mile option affordable." in lines[1]
     assert any("buy 2,000 delta miles for about $75.25" in l and "50% bonus sale" in l for l in lines)
     assert "Total: 76,700 miles + $75.25 (retail would be $150.50)." in alert.message
@@ -486,3 +508,69 @@ def test_a_promo_alert_does_not_suppress_an_award_alert_for_the_same_trip(conn):
     affordable = analysis_for(trip, [good_option()])
 
     assert decide_alert(conn, affordable) is not None
+
+
+# --- a cabin is only worth the miles if they beat paying cash -----------------------------------
+
+def test_no_alert_when_the_miles_would_buy_less_than_a_cent_each_of_cash_fare(conn):
+    cheap_cash = TripBaseline(cabin_fares=(fare(300), fare(300)), economy_fares=(fare(300), fare(300)))
+
+    _, analysis, alert = alert_for(conn, [good_option()], baseline_value=cheap_cash)
+
+    assert analysis.affordable and alert is None  # 600 of cash for 71,800 miles is 0.84 c a mile
+
+
+def test_a_missing_cash_price_does_not_silence_an_award_alert(conn):
+    _, _, alert = alert_for(conn, [good_option()], baseline_value=None)
+
+    assert alert is not None
+
+
+# --- better-cabin alerts, driven by cash fares ---------------------------------------------------
+
+NOW = datetime.now(timezone.utc)  # alerts are stamped with the real clock, so 'later' is relative to it
+
+
+def cabin_analyses(conn, economy=(300, 320), business=(400, 420), business_options=(), trip=None):
+    trip = trip or add_trip(conn)
+
+    def base(cabin_fares):
+        return TripBaseline(cabin_fares=tuple(fare(p) for p in cabin_fares),
+                            economy_fares=tuple(fare(p) for p in economy), fetched_at="2026-09-20T08:00:00Z")
+
+    return [
+        analysis_for(trip, [], baseline_value=base(economy), cabin=Cabin.ECONOMY),
+        analysis_for(trip, list(business_options), baseline_value=base(business), cabin=Cabin.BUSINESS),
+    ]
+
+
+def test_a_business_fare_close_to_economy_makes_a_better_cabin_alert(conn):
+    alert = decide_upgrade_alert(conn, cabin_analyses(conn), now=NOW)
+
+    assert alert.title == "Costa Rica: business is only $200 more"
+    lines = alert.message.split("\n")
+    assert lines[0] == "RNO > SJO  Jan 09 - Jan 16"
+    assert "Business by cash is $820 (out $400, back $420)" in lines[1]
+    assert "1.32x" in lines[2]
+    assert "Cash fares as of 2026-09-20" in alert.message
+
+
+def test_a_business_fare_far_above_economy_makes_no_alert(conn):
+    assert decide_upgrade_alert(conn, cabin_analyses(conn, business=(500, 500)), now=NOW) is None
+
+
+def test_a_cabin_made_cheap_by_an_affordable_award_is_left_to_the_award_alert(conn):
+    analyses = cabin_analyses(conn, business=(1500, 1500), business_options=[good_option()])
+
+    assert decide_upgrade_alert(conn, analyses, now=NOW) is None  # 71,800 miles is ~$718: cheaper than its cash fare
+
+
+def test_a_better_cabin_alert_is_not_repeated_within_a_week_unless_it_got_cheaper(conn):
+    trip = add_trip(conn)
+    first = decide_upgrade_alert(conn, cabin_analyses(conn, trip=trip), now=NOW)
+    record_upgrade_sent(conn, first)
+
+    assert decide_upgrade_alert(conn, cabin_analyses(conn, trip=trip), now=NOW + timedelta(days=2)) is None
+    cheaper = cabin_analyses(conn, business=(380, 400), trip=trip)
+    assert decide_upgrade_alert(conn, cheaper, now=NOW + timedelta(days=2)) is not None
+    assert decide_upgrade_alert(conn, cabin_analyses(conn, trip=trip), now=NOW + timedelta(days=RE_ALERT_DAYS + 1)) is not None

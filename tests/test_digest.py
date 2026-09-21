@@ -40,7 +40,7 @@ def gap(out_miles=16_700, *, updated=FRESH):
 
 def section(conn, options, *, counts=None, promos=None, **kwargs):
     trip = add_trip(conn)
-    return trip_section(analysis_for(trip, options, **kwargs), counts or {}, promos or {}, TODAY)
+    return trip_section([analysis_for(trip, options, **kwargs)], counts or {}, promos or {}, TODAY)
 
 
 def sale(program="delta", url="https://x.test/s", tiers=()):
@@ -83,8 +83,10 @@ def test_with_nothing_affordable_it_names_the_closest_miss(conn):
 
 
 def test_with_no_options_at_all_it_says_so_without_a_closest_miss(conn):
-    assert section(conn, []) == ["Costa Rica: RNO > SJO  Jan 09 - Jan 16", "No affordable award options right now.",
-                                 "Alerts sent in the last 7 days: none.", ]
+    assert section(conn, []) == [
+        "Costa Rica: RNO > SJO  Jan 09 - Jan 16", "-- business --", "No affordable award options right now.",
+        "Cheapest way to fly: $2,267 (business, cash).", "Alerts sent in the last 7 days: none.",
+    ]
 
 
 # --- alerts sent this week ------------------------------------------------------------------------------------
@@ -94,6 +96,7 @@ def test_with_no_options_at_all_it_says_so_without_a_closest_miss(conn):
     ({"award": 2}, "Alerts sent in the last 7 days: 2 award."),
     ({"promo": 1}, "Alerts sent in the last 7 days: 1 sale."),
     ({"award": 1, "promo": 3}, "Alerts sent in the last 7 days: 1 award, 3 sale."),
+    ({"award": 1, "upgrade": 2}, "Alerts sent in the last 7 days: 1 award, 2 better-cabin."),
 ])
 def test_the_alert_line(conn, counts, expected):
     assert expected in section(conn, [affordable()], counts=counts)
@@ -254,3 +257,43 @@ def test_alerts_for_other_trips_are_not_mixed_in(conn):
     db.record_alert(conn, trip_id=other["id"], alert_type="award", dedupe_key="x")
 
     assert alert_counts_for(conn, [analysis_for(mine, [affordable()])], datetime.now(timezone.utc)) == {mine["id"]: {}}
+
+
+# --- one trip, several cabins ---------------------------------------------------------------------------------
+
+def cabin_baseline(business, economy=(300, 320)):
+    return TripBaseline(cabin_fares=tuple(fare(p) for p in business), economy_fares=tuple(fare(p) for p in economy))
+
+
+def cabins_section(conn, business=(400, 420), business_options=()):
+    from flight_optimizer.seats_aero import Cabin
+
+    trip = add_trip(conn)
+    economy = analysis_for(trip, [], baseline_value=cabin_baseline((300, 320)), cabin=Cabin.ECONOMY)
+    better = analysis_for(trip, list(business_options), baseline_value=cabin_baseline(business), cabin=Cabin.BUSINESS)
+    return trip_section([economy, better], {}, {}, TODAY)
+
+
+def test_each_cabin_gets_its_own_block_under_one_trip_header(conn):
+    lines = cabins_section(conn)
+
+    assert lines[0] == "Costa Rica: RNO > SJO  Jan 09 - Jan 16"
+    assert lines.index("-- economy --") < lines.index("-- business --")
+    assert sum(l.startswith("Alerts sent") for l in lines) == 1   # trip-level lines appear once
+
+
+def test_the_digest_names_the_cheapest_way_and_a_better_cabin_worth_a_look(conn):
+    lines = cabins_section(conn)
+
+    assert "Cheapest way to fly: $620 (economy, cash)." in lines
+    assert "Better cabin worth a look: business at $820 by cash (+$200, 1.32x)." in lines
+
+
+def test_a_far_dearer_cabin_is_not_called_worth_a_look(conn):
+    assert not any("worth a look" in l for l in cabins_section(conn, business=(900, 900)))
+
+
+def test_an_affordable_award_can_be_the_cheap_way_to_a_better_cabin(conn):
+    lines = cabins_section(conn, business=(1500, 1500), business_options=[affordable()])
+
+    assert "Better cabin worth a look: business at $718 by award (+$98, 1.16x)." in lines

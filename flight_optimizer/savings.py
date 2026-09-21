@@ -55,15 +55,16 @@ def trip_baseline(
     client: SerpApiClient,
     trip: sqlite3.Row,
     *,
+    cabin: Cabin,
     max_layover_minutes: int = cash_fares.DEFAULT_MAX_LAYOVER_MINUTES,
     max_total_minutes: int = cash_fares.DEFAULT_MAX_TOTAL_MINUTES,
     **fare_options,
 ) -> TripBaseline:
     """Baselines for every direction of the trip. Uses cached searches where fresh.
 
-    Costs up to 2 searches per direction (award cabin and economy), fewer if cached.
+    Costs up to 2 searches per direction (`cabin` and economy), fewer if cached; for economy
+    itself the two are the same search.
     """
-    award_cabin = Cabin[trip["cabin"].upper()]
     directions = [(trip["origin"], trip["destination"], date.fromisoformat(trip["depart_date"]))]
     if trip["return_date"]:
         directions.append(
@@ -86,7 +87,7 @@ def trip_baseline(
             )
         return tuple(fares)
 
-    cabin_fares, economy_fares = baseline_for(award_cabin), baseline_for(Cabin.ECONOMY)
+    cabin_fares, economy_fares = baseline_for(cabin), baseline_for(Cabin.ECONOMY)
     return TripBaseline(
         cabin_fares=cabin_fares,
         economy_fares=economy_fares,

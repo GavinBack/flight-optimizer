@@ -17,6 +17,9 @@ from flight_optimizer.seats_aero import AwardResult, Cabin, SeatsAeroClient
 
 # Legs reporting fewer seats than this are treated as unbookable. Set to 0 to keep them.
 MIN_SEATS = 1
+# Every trip is priced in these cabins (the owner's rule). Premium economy simply finds nothing
+# on routes that don't sell it. First is left out: the goal is economy, and upgrades to business.
+EVALUATED_CABINS = (Cabin.ECONOMY, Cabin.PREMIUM_ECONOMY, Cabin.BUSINESS)
 
 # Owner's rule: offers and availability should be current. Award data is judged by its age in
 # days, and an option by its stalest leg (an option is only as reliable as its weakest leg).
@@ -198,16 +201,39 @@ def search_one_way(
     return sorted(itineraries, key=lambda i: i.total_miles)
 
 
+class _SearchMemo:
+    """Wraps a client so identical searches are paid for once.
+
+    One Seats.aero search returns every cabin, so searching a trip cabin by cabin would repeat
+    the same calls. Everything but `search` is passed through to the real client.
+    """
+
+    def __init__(self, client: SeatsAeroClient):
+        self._client = client
+        self._results: dict[tuple, list[AwardResult]] = {}
+
+    def search(self, origin, destination, start_date, end_date, *, sources=None, **options):
+        key = (origin, destination, start_date, end_date, tuple(sources or ()), tuple(sorted(options.items())))
+        if key not in self._results:
+            self._results[key] = self._client.search(
+                origin, destination, start_date, end_date, sources=sources, **options
+            )
+        return self._results[key]
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+
 def search_trip(
     client: SeatsAeroClient,
     trip: sqlite3.Row,
     gateways: list[str],
     *,
+    cabin: Cabin,
     max_layover_days: int = 1,
     sources: list[str] | None = None,
     min_seats: int = MIN_SEATS,
 ) -> TripSearchResult:
-    cabin = Cabin[trip["cabin"].upper()]
     options = dict(
         gateways=gateways, cabin=cabin, max_layover_days=max_layover_days,
         sources=sources, min_seats=min_seats,
@@ -226,11 +252,24 @@ def search_trip(
     return TripSearchResult(trip_id=trip["id"], outbound=outbound, return_trip=return_trip)
 
 
+def search_trip_cabins(
+    client: SeatsAeroClient,
+    trip: sqlite3.Row,
+    gateways: list[str],
+    *,
+    cabins: tuple[Cabin, ...] = EVALUATED_CABINS,
+    **options,
+) -> dict[Cabin, TripSearchResult]:
+    """The trip searched in every cabin, for the API calls of one search (see `_SearchMemo`)."""
+    memo = _SearchMemo(client)
+    return {cabin: search_trip(memo, trip, gateways, cabin=cabin, **options) for cabin in cabins}
+
+
 def search_active_trips(
     conn: sqlite3.Connection, client: SeatsAeroClient, **options
-) -> dict[int, TripSearchResult]:
-    """Search every active trip, and only active trips (see `db.active_trips`)."""
+) -> dict[int, dict[Cabin, TripSearchResult]]:
+    """Search every active trip in every evaluated cabin, and only active trips (see `db.active_trips`)."""
     return {
-        trip["id"]: search_trip(client, trip, db.get_gateways(conn, trip["id"]), **options)
+        trip["id"]: search_trip_cabins(client, trip, db.get_gateways(conn, trip["id"]), **options)
         for trip in db.active_trips(conn)
     }

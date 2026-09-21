@@ -298,7 +298,7 @@ def test_report_covers_active_trips_only_and_shows_usage(conn):
     assert "Active One" in text and "Shelved One" not in text
     assert "#1  71,800 miles" in text
     assert "Seats.aero calls left today: 950" in text
-    assert "SerpApi searches this run: 4" in text
+    assert "SerpApi searches this run: 6" in text  # 3 cabins x 2 directions; economy is shared
     assert "Legs reporting 0 seats are excluded as unbookable" in text
 
 
@@ -642,3 +642,31 @@ def test_without_a_cash_baseline_the_buy_plan_omits_the_comparison(conn):
     text = render(conn, [gap_option()], baseline=None)
 
     assert "GAPS YOU COULD CLOSE" in text and "cash ticket:" not in text.split("GAPS YOU COULD CLOSE")[1]
+
+
+# --- cabins -----------------------------------------------------------------------------------------------------
+
+def test_an_economy_section_does_not_repeat_economy_as_its_own_comparison(conn):
+    economy = TripBaseline(cabin_fares=BASELINE.economy_fares, economy_fares=BASELINE.economy_fares)
+
+    text = render(conn, [best_option()], baseline=economy, cabin=Cabin.ECONOMY)
+
+    assert "(economy)" in text.splitlines()[1]
+    assert "costs $" not in text                                  # "economy costs $0 more than economy"
+    assert text.count("c/mile vs economy cash") == 1              # not once as the cabin and once as the baseline
+    assert text.split("CASH BASELINE")[1].split("BEST AFFORDABLE")[0].count("economy ") == 1
+    assert text.split("CASH THROUGH-TICKET")[1].count("TOTAL $699") == 1
+
+
+def test_a_business_section_still_compares_against_economy(conn):
+    text = render(conn, [best_option()], cabin=Cabin.BUSINESS)
+
+    assert "business costs $" in text and "c/mile vs economy cash" in text
+
+
+def test_a_premium_economy_section_is_labelled_as_such(conn):
+    text = render(conn, [best_option()], cabin=Cabin.PREMIUM_ECONOMY)
+
+    assert "(premium economy)" in text.splitlines()[1] and "premium economy costs $" in text
+    assert "premium economy out $1,505" in text     # the name must not run into the fares
+    assert "economy         out $323" in text       # and the economy row stays aligned under it

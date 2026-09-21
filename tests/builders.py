@@ -67,9 +67,9 @@ def add_trip(conn, **overrides):
     return conn.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
 
 
-def analysis_for(trip, ranked, *, baseline_value="default"):
+def analysis_for(trip, ranked, *, baseline_value="default", cabin=Cabin.BUSINESS):
     return TripAnalysis(
         trip=trip, gateways=["LAX"], ranked=ranked,
         baseline=baseline() if baseline_value == "default" else baseline_value,
-        cash_note=None, stats=EnrichmentStats(),
+        cash_note=None, stats=EnrichmentStats(), cabin=cabin,
     )

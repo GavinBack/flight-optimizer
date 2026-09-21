@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS trips (
     return_date TEXT,
     -- Gates the daily check and every alert for this trip. Off by default.
     active      INTEGER NOT NULL DEFAULT 0 CHECK (active IN (0, 1)),
+    -- Unused: every trip is priced in economy, premium economy and business (itineraries.EVALUATED_CABINS).
     cabin       TEXT NOT NULL DEFAULT 'business'
                 CHECK (cabin IN ('economy', 'premium_economy', 'business', 'first')),
     -- NULL means no limit.
@@ -206,6 +207,44 @@ def get_gateways(conn: sqlite3.Connection, trip_id: int) -> list[str]:
         "SELECT airport FROM trip_gateways WHERE trip_id = ? ORDER BY airport", (trip_id,)
     )
     return [row["airport"] for row in rows]
+
+
+def update_trip(
+    conn: sqlite3.Connection,
+    trip_id: int,
+    *,
+    name: str | None = None,
+    depart_date: date | None = None,
+    return_date: date | None = None,
+    one_way: bool = False,
+    active: bool | None = None,
+) -> None:
+    """Change a trip. Only the fields given are touched; `one_way` clears the return date."""
+    trip = conn.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
+    if trip is None:
+        raise LookupError(f"No trip with id {trip_id}")
+
+    new_depart = depart_date or date.fromisoformat(trip["depart_date"])
+    if one_way:
+        new_return = None
+    elif return_date is not None:
+        new_return = return_date
+    else:
+        new_return = date.fromisoformat(trip["return_date"]) if trip["return_date"] else None
+    if new_return is not None and new_return < new_depart:
+        raise ValueError("The return date is before the departure date.")
+
+    with conn:
+        conn.execute(
+            "UPDATE trips SET name = ?, depart_date = ?, return_date = ?, active = ? WHERE id = ?",
+            (
+                name if name is not None else trip["name"],
+                new_depart.isoformat(),
+                new_return.isoformat() if new_return else None,
+                int(active) if active is not None else trip["active"],
+                trip_id,
+            ),
+        )
 
 
 def set_trip_active(conn: sqlite3.Connection, trip_id: int, active: bool) -> None:

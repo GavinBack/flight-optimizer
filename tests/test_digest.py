@@ -58,7 +58,7 @@ def test_a_mix_of_fresh_and_stale_options_is_counted_by_tier(conn):
     lines = section(conn, [affordable(), affordable(updated=AGING, flights=("A", "B", "C", "D")), affordable(updated=STALE, flights=("E", "F", "G", "H"))])
 
     assert "3 affordable award options: 1 current, 1 aging, 1 stale." in lines
-    assert "Best with usable data: 71,800 miles (3.2 c/mile vs $2,267 cash)." in lines
+    assert "Best with usable data: 71,800 miles + $305 taxes (2.7 c/mile vs $2,267 cash)." in lines
 
 
 def test_a_single_option_is_not_pluralised(conn):
@@ -265,11 +265,11 @@ def cabin_baseline(business, economy=(300, 320)):
     return TripBaseline(cabin_fares=tuple(fare(p) for p in business), economy_fares=tuple(fare(p) for p in economy))
 
 
-def cabins_section(conn, business=(400, 420), business_options=()):
+def cabins_section(conn, business=(400, 420), business_options=(), economy=(300, 320)):
     from flight_optimizer.seats_aero import Cabin
 
     trip = add_trip(conn)
-    economy = analysis_for(trip, [], baseline_value=cabin_baseline((300, 320)), cabin=Cabin.ECONOMY)
+    economy = analysis_for(trip, [], baseline_value=cabin_baseline(economy), cabin=Cabin.ECONOMY)
     better = analysis_for(trip, list(business_options), baseline_value=cabin_baseline(business), cabin=Cabin.BUSINESS)
     return trip_section([economy, better], {}, {}, TODAY)
 
@@ -294,9 +294,17 @@ def test_a_far_dearer_cabin_is_not_called_worth_a_look(conn):
 
 
 def test_an_affordable_award_can_be_the_cheap_way_to_a_better_cabin(conn):
-    lines = cabins_section(conn, business=(1500, 1500), business_options=[affordable()])
+    lines = cabins_section(conn, business=(1500, 1500), business_options=[affordable()], economy=(450, 450))
 
-    assert "Better cabin worth a look: business at $718 by award (+$98, 1.16x)." in lines
+    # 71,800 miles is $718, plus $305 of taxes: $1,023 against a $900 economy fare.
+    assert "Better cabin worth a look: business at $1,023 by award (+$123, 1.14x)." in lines
+
+
+def test_taxes_can_make_an_award_too_dear_to_call_an_upgrade(conn):
+    lines = cabins_section(conn, business=(1500, 1500), business_options=[affordable()])   # economy $620
+
+    # Before taxes this was $718, 1.16x economy. With $305 of taxes it is $1,023, 1.65x: past the 1.5x line.
+    assert not any("worth a look" in l for l in lines)
 
 
 # --- the pointer to the latest advice ----------------------------------------------------------------------------

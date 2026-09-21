@@ -2,8 +2,8 @@
 
 The owner's goal is the best price for each trip, and to notice when business (or premium
 economy) costs little enough to be worth taking instead of economy. To compare a cash fare with
-an award on one scale, an award is costed as its miles times `MILE_VALUE_CENTS`, before taxes
-and fees (the rest of the app treats award figures the same way).
+an award on one scale, an award is costed as its miles times `MILE_VALUE_CENTS` plus its taxes and fees
+in dollars (`taxes.py`, at approximate exchange rates).
 
 Both numbers below were accepted by the owner (2026-09-21); revisit them if the owner's goals change:
 
@@ -25,6 +25,7 @@ from flight_optimizer.affordability import TripOption
 from flight_optimizer.analysis import TripAnalysis
 from flight_optimizer.itineraries import Freshness
 from flight_optimizer.seats_aero import Cabin
+from flight_optimizer.taxes import Taxes, option_taxes
 
 MILE_VALUE_CENTS = 1.0
 UPGRADE_MAX_MULTIPLE = 1.5
@@ -43,7 +44,8 @@ class CabinOutlook:
     cabin: Cabin
     cash: int | None  # cheapest reasonable cash round trip
     award: TripOption | None  # the cheapest (in miles) affordable award whose data is not stale
-    award_cost: float | None  # its miles at MILE_VALUE_CENTS, in dollars
+    award_cost: float | None  # its miles at MILE_VALUE_CENTS plus its taxes, in dollars
+    award_taxes: Taxes | None = None  # the taxes part of that
 
     @property
     def best_cost(self) -> float | None:
@@ -86,11 +88,13 @@ class CabinComparison:
 def outlook_for(analysis: TripAnalysis, today: date) -> CabinOutlook:
     usable = [o for o in analysis.affordable if o.freshness(today) is not Freshness.STALE]
     award = min(usable, key=lambda o: o.total_miles) if usable else None  # a cost comparison: the fewest miles
+    taxes = None if award is None else option_taxes(award)
     return CabinOutlook(
         cabin=analysis.cabin,
         cash=analysis.baseline.cabin_total if analysis.baseline is not None else None,
         award=award,
-        award_cost=None if award is None else award.total_miles * MILE_VALUE_CENTS / 100,
+        award_cost=None if award is None else award.total_miles * MILE_VALUE_CENTS / 100 + taxes.usd,
+        award_taxes=taxes,
     )
 
 

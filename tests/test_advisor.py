@@ -324,3 +324,24 @@ def test_the_brief_includes_the_shared_balances_check_only_for_several_trips(con
 
     assert "SHARED BALANCES" in many and "SHARED BALANCES" not in one
     assert "unchecked" not in SYSTEM_PROMPT.lower() and "SHARED BALANCES section" in SYSTEM_PROMPT
+
+
+def test_a_change_in_an_options_taxes_asks_again_but_a_few_dollars_do_not(conn):
+    from dataclasses import replace
+    from flight_optimizer.affordability import TripOption
+    from flight_optimizer.itineraries import Itinerary
+
+    def with_tax(amount):
+        base = good_option()
+        legs = lambda it: Itinerary(legs=tuple(replace(l, total_taxes=amount) for l in it.legs), via=it.via)
+        return TripOption(itineraries=tuple(legs(it) for it in base.itineraries), affordability=base.affordability)
+
+    trip = conn.execute("SELECT * FROM trips ORDER BY id LIMIT 1").fetchone() or add_trip(conn)
+    from builders import analysis_for as build_analysis
+    first = [build_analysis(trip, [with_tax(10_600)], cabin=Cabin.BUSINESS)]
+    close = [build_analysis(trip, [with_tax(10_700)], cabin=Cabin.BUSINESS)]      # $2.88 more: same $10 bucket
+    far = [build_analysis(trip, [with_tax(30_000)], cabin=Cabin.BUSINESS)]
+
+    assert print_of(first) == print_of(close)
+    assert print_of(first) != print_of(far)
+    assert "converted at fixed approximate" in SYSTEM_PROMPT and "exclude taxes" not in SYSTEM_PROMPT

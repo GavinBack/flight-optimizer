@@ -54,8 +54,9 @@ def test_an_award_is_costed_at_the_mile_value_and_the_cheaper_way_wins(conn):
     outlook = outlook_for(analyses(conn, business=2000, business_options=[good_option()])[2], TODAY)
 
     assert outlook.cash == 2000
-    assert outlook.award_cost == pytest.approx(718)      # 71,800 miles at 1 cent
-    assert (outlook.best_cost, outlook.best_way) == (pytest.approx(718), "award")
+    assert outlook.award_cost == pytest.approx(718 + 305.28)      # 71,800 miles at 1 cent, plus CAD 424 of taxes at 0.72
+    assert outlook.award_taxes.usd == pytest.approx(305.28) and outlook.award_taxes.complete
+    assert (outlook.best_cost, outlook.best_way) == (pytest.approx(1_023.28), "award")
 
 
 def test_the_award_used_for_cost_is_the_one_with_the_fewest_miles(conn):
@@ -158,7 +159,7 @@ def test_an_affordable_award_is_shown_with_its_dollar_equivalent(conn):
     out = text(conn, business=2000, business_options=[good_option()])
 
     business = next(l for l in out.splitlines() if l.lstrip().startswith("business"))
-    assert "71,800 miles (~$718)" in business and "$718 award" in business
+    assert "71,800 miles + $305 taxes (~$1,023)" in business and "$1,023 award" in business
 
 
 def test_a_cabin_nobody_sells_says_none_found(conn):

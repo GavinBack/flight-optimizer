@@ -23,6 +23,11 @@ class Cabin(str, Enum):
     FIRST = "F"
 
 
+# Currencies whose `TotalTaxes` was checked against the program's own booking page: hundredths, so 10600 is 106.00.
+# Seats.aero's docs give no unit (integer, example 1290). Add a currency here only after checking one.
+TAX_UNIT_CONFIRMED = {"CAD": "Aeroplan LAX>SJO, 10600 = CAD 106.00 on aircanada.com (owner, 2026-09-21)"}
+
+
 class SeatsAeroError(Exception):
     def __init__(self, message: str, status_code: int | None = None):
         super().__init__(message)
@@ -47,7 +52,7 @@ class AwardResult:
     date: date
     cabin: Cabin
     miles: int
-    total_taxes: int  # as returned by the API; units not verified
+    total_taxes: int  # hundredths of `currency` (confirmed for the currencies in TAX_UNIT_CONFIRMED only)
     currency: str
     remaining_seats: int
     airlines: str

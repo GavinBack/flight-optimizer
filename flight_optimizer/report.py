@@ -26,6 +26,7 @@ from flight_optimizer.itineraries import (
 )
 from flight_optimizer.promos import Promo, active_promos, best_promos
 from flight_optimizer.savings import TripBaseline, estimate_value
+from flight_optimizer.taxes import option_taxes, rates_note
 from flight_optimizer.seats_aero import AwardResult, Cabin, SeatsAeroClient
 from flight_optimizer.windows import window_note
 
@@ -351,16 +352,18 @@ def render_comparison(comparison: CabinComparison) -> str:
     """One trip across cabins: what each costs by cash or affordable award, and any worthwhile upgrade."""
     trip = comparison.trip
     out = [RULE, f"{trip['name']}   {trip['origin']} > {trip['destination']}   CABINS AT A GLANCE", RULE, ""]
-    out.append(f"  {'cabin':<17}{'cash':>9}   {'affordable award':<34}{'cheapest way':>14}")
+    out.append(f"  {'cabin':<17}{'cash':>9}   {'affordable award (miles + taxes)':<46}{'cheapest way':>14}")
     cheapest = comparison.cheapest
     upgrades = {u.outlook.cabin: u for u in comparison.upgrades}
     for o in comparison.outlooks:
         if o.award is not None:
-            award = f"{o.award.total_miles:,} miles (~{_money(o.award_cost)})"
+            taxes = o.award_taxes
+            extra = f" + {taxes.text}" if taxes is not None and (taxes.usd or not taxes.complete) else ""
+            award = f"{o.award.total_miles:,} miles{extra} (~{_money(o.award_cost)})"
         else:
             award = "none you can afford" if o.offered else "none found"
         way = "-" if o.best_cost is None else f"{_money(o.best_cost)} {o.best_way}"
-        line = f"  {cabin_label(o.cabin):<17}{_money(o.cash):>9}   {award:<34}{way:>14}"
+        line = f"  {cabin_label(o.cabin):<17}{_money(o.cash):>9}   {award:<46}{way:>14}"
         if cheapest is not None and o.cabin is cheapest.cabin:
             line += "   cheapest"
         elif o.cabin in upgrades:
@@ -371,8 +374,8 @@ def render_comparison(comparison: CabinComparison) -> str:
         out.append("  Nothing priced in any cabin yet.")
     out.append("")
     out.append(
-        f"  Awards are costed at {MILE_VALUE_CENTS:g} cent per mile (assumed: Capital One's travel-eraser rate),"
-        " before taxes and fees."
+        f"  Awards are costed at {MILE_VALUE_CENTS:g} cent per mile (assumed: Capital One's travel-eraser rate)"
+        " plus their taxes and fees in dollars (approximate exchange rates)."
     )
     out.append(
         f"  A better cabin is flagged when it costs at most {UPGRADE_MAX_MULTIPLE:g}x the cheapest way to fly."
@@ -467,6 +470,9 @@ def render_trip(
         out.append("  Nothing affordable with current balances. See the closest misses below.")
     for rank, (option, variants) in enumerate(_group_by_shape(affordable)[:top_n], start=1):
         head = f"#{rank}  {option.total_miles:,} miles"
+        taxes = option_taxes(option)
+        if taxes.usd or not taxes.complete:
+            head += f" + {taxes.text}"
         if trip["flexible"]:
             head += f"   {_option_dates(option)}"
         if baseline is not None:
@@ -604,7 +610,9 @@ def build_report(
         usage.append(f"SerpApi searches this run: {cash.searches_made} (cached results are free)")
     sections.append(
         "NOTES\n"
-        "  * = connecting flight. Award figures are before taxes and fees, so cents per mile are upper bounds.\n"
+        "  * = connecting flight. Cents per mile are after the award's taxes and fees (cash replaced minus taxes, over miles).\n"
+        f"  {rates_note()}\n"
+        "  A leg reporting no taxes counts as none, though Seats.aero cannot tell free from unknown.\n"
         "  Legs reporting 0 seats are excluded as unbookable (some programs report 0 for everything).\n"
         "  One ticket = same program and same-day connection (assumed, so verify: a program may price the\n"
         "  combined trip differently from its legs). Cash baselines are single tickets, so mixed-program\n"

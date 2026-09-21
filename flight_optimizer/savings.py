@@ -1,8 +1,9 @@
 """Value an award option against the cash baseline: cash replaced and cents per mile.
 
 The comparison is against the trip's through fare (e.g. RNO>SJO as one cash ticket),
-even though awards may be built from separate legs via a gateway hub. All figures
-are before award taxes and fees, so they are upper bounds on value.
+even though awards may be built from separate legs via a gateway hub. An award still costs
+its taxes and fees in cash, so cents per mile is (cash replaced - taxes) / miles, with the
+taxes converted to dollars at approximate rates (`taxes.py`).
 """
 
 import sqlite3
@@ -13,6 +14,7 @@ from flight_optimizer import cash_fares
 from flight_optimizer.affordability import TripOption
 from flight_optimizer.cash_fares import CashFare, SerpApiClient
 from flight_optimizer.seats_aero import Cabin
+from flight_optimizer.taxes import Taxes, option_taxes
 
 
 @dataclass(frozen=True)
@@ -46,9 +48,10 @@ class TripBaseline:
 class ValueEstimate:
     cabin_cash: int | None  # baseline cash price, award cabin
     economy_cash: int | None  # baseline cash price, economy
-    cents_per_mile_vs_cabin: float | None
-    cents_per_mile_vs_economy: float | None
+    cents_per_mile_vs_cabin: float | None  # after the award's taxes
+    cents_per_mile_vs_economy: float | None  # after the award's taxes
     upgrade_premium: int | None  # extra cash the premium cabin costs over economy
+    taxes: Taxes = Taxes(usd=0.0, complete=True, unchecked=())  # what the award still costs in cash
 
 
 def trip_baseline(
@@ -99,12 +102,13 @@ def trip_baseline(
 
 
 def estimate_value(option: TripOption, baseline: TripBaseline) -> ValueEstimate:
-    """Cents per mile = cash replaced / miles x 100, before award taxes and fees."""
+    """Cents per mile = (cash replaced - award taxes and fees) / miles x 100."""
     miles = option.total_miles
     cabin_cash, economy_cash = baseline.cabin_total, baseline.economy_total
+    taxes = option_taxes(option)
 
     def cents_per_mile(cash: int | None) -> float | None:
-        return None if cash is None or miles == 0 else cash / miles * 100
+        return None if cash is None or miles == 0 else (cash - taxes.usd) / miles * 100
 
     premium = None if cabin_cash is None or economy_cash is None else cabin_cash - economy_cash
     return ValueEstimate(
@@ -113,4 +117,5 @@ def estimate_value(option: TripOption, baseline: TripBaseline) -> ValueEstimate:
         cents_per_mile_vs_cabin=cents_per_mile(cabin_cash),
         cents_per_mile_vs_economy=cents_per_mile(economy_cash),
         upgrade_premium=premium,
+        taxes=taxes,
     )

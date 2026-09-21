@@ -19,6 +19,7 @@ from flight_optimizer.programs import PROGRAM_NAMES, STALE_AFTER_DAYS
 from flight_optimizer.promos import Promo
 from flight_optimizer.report import miss_text
 from flight_optimizer.savings import estimate_value
+from flight_optimizer.taxes import option_taxes
 from flight_optimizer.windows import window_note
 
 DIGEST_INTERVAL = timedelta(days=7)
@@ -93,11 +94,13 @@ def _cabin_lines(analysis: TripAnalysis, promos: dict[str, Promo], today: date) 
         usable = [o for o in affordable if o.freshness(today) is not Freshness.STALE]
         if usable:
             best = usable[0]
-            value = ""
+            value, taxes = "", option_taxes(best)
+            if taxes.usd or not taxes.complete:
+                value = f" + {taxes.text}"
             if analysis.baseline is not None:
                 estimate = estimate_value(best, analysis.baseline)
                 if estimate.cents_per_mile_vs_cabin is not None:
-                    value = f" ({estimate.cents_per_mile_vs_cabin:.1f} c/mile vs ${estimate.cabin_cash:,} cash)"
+                    value += f" ({estimate.cents_per_mile_vs_cabin:.1f} c/mile vs ${estimate.cabin_cash:,} cash)"
             lines.append(f"Best with usable data: {best.total_miles:,} miles{value}.")
         else:
             freshest = min(

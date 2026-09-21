@@ -17,7 +17,8 @@ from flight_optimizer.cabins import cabin_label
 from flight_optimizer.programs import PROGRAM_NAMES
 from flight_optimizer.report import freshness_label
 from flight_optimizer.savings import estimate_value
-from flight_optimizer.seats_aero import Cabin
+from flight_optimizer.taxes import option_taxes, rates_note
+from flight_optimizer.seats_aero import TAX_UNIT_CONFIRMED, Cabin
 
 DEFAULT_DIRECTORY = Path("plans")
 
@@ -38,10 +39,10 @@ def _leg_line(leg) -> str:
 def _taxes_line(leg) -> str:
     if not leg.total_taxes:
         return "taxes/fees: none reported"
-    return (
-        f"taxes/fees: about {leg.total_taxes / 100:,.2f} {leg.currency} "
-        f"(Seats.aero reports {leg.total_taxes}; assumed hundredths, so confirm on the booking page)"
-    )
+    amount = f"taxes/fees: about {leg.total_taxes / 100:,.2f} {leg.currency} "
+    if leg.currency in TAX_UNIT_CONFIRMED:
+        return amount + f"(Seats.aero reports {leg.total_taxes}, in hundredths)"
+    return amount + f"(Seats.aero reports {leg.total_taxes}; assumed hundredths, so confirm on the booking page)"
 
 
 def render_plan(
@@ -76,6 +77,9 @@ def render_plan(
     ]
 
     headline = f"THE OPTION: {option.total_miles:,} miles"
+    taxes = option_taxes(option)
+    if taxes.usd or not taxes.complete:
+        headline += f" + {taxes.text}"
     if analysis.baseline is not None:
         value = estimate_value(option, analysis.baseline)
         if value.cents_per_mile_vs_cabin is not None:
@@ -190,7 +194,9 @@ def render_plan(
     out += [
         "",
         "NOTES",
-        "  Award figures are before taxes and fees. Legs reporting 0 seats are excluded. A connection of",
+        f"  {rates_note()}",
+        "  A leg reporting no taxes counts as none, though Seats.aero cannot tell free from unknown.",
+        "  Legs reporting 0 seats are excluded. A connection of",
         "  1 hour or less is never recommended; under 2.5 hours is flagged. Separate bookings mean bags are",
         "  re-checked and the airline is not responsible for a missed connection between them.",
     ]

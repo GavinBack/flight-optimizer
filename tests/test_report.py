@@ -785,3 +785,57 @@ def test_no_history_lines_without_history_data(conn):
     text = render(conn, [])
 
     assert "cash history" not in text and "target" not in text
+
+
+# --- award taxes --------------------------------------------------------------------------------------------------------
+
+def with_taxes(currency, amount):
+    from dataclasses import replace
+    legs = lambda day, o, d, src, miles: replace(leg(o, d, src, miles, day), total_taxes=amount, currency=currency)
+    return option(
+        [legs(JAN9, "RNO", "LAX", "american", 25_000), legs(JAN9, "LAX", "SJO", "aeroplan", 25_000)],
+        [legs(JAN16, "SJO", "LAX", "aeroplan", 25_000), legs(JAN16, "LAX", "RNO", "delta", 10_900)],
+    )
+
+
+def test_an_option_shows_its_taxes_and_the_value_after_them(conn):
+    text = render(conn, [with_taxes("USD", 5_000)])          # four legs of $50: $200 of taxes
+
+    assert "#1  85,900 miles + $200 taxes   2.41 c/mile vs business cash   0.58 c/mile vs economy cash" in text
+
+
+def test_an_option_with_an_unconvertible_currency_says_its_taxes_are_partly_unknown(conn):
+    text = render(conn, [with_taxes("MXN", 5_000)])
+
+    assert "#1  85,900 miles + $0+ taxes" in text
+
+
+def test_an_option_without_taxes_reads_as_before(conn):
+    text = render(conn, [best_option()])
+
+    assert "#1  85,900 miles   2.64 c/mile" in text and "taxes" not in text.split("#1")[1].splitlines()[0]
+
+
+def test_the_notes_explain_how_taxes_are_counted(conn):
+    add_trip(conn, name="Active One")
+    db.set_gateways(conn, 1, ["LAX"])
+    db.set_balance(conn, "delta", 30_000)
+    db.set_balance(conn, "capital_one", 100_000)
+
+    text = build_report(conn, FakeAwards(AWARD_TABLE, ALL_DETAILS), FakeCash(), today=TODAY)
+
+    assert "Cents per mile are after the award's taxes and fees" in text
+    assert "fixed approximate rates (CAD 0.72" in text and "only CAD is confirmed" in text
+    assert "before taxes and fees" not in text
+
+
+def test_the_cabin_table_shows_the_taxes_in_an_awards_cost(conn):
+    from flight_optimizer.cabins import compare_cabins
+    from flight_optimizer.report import render_comparison
+    from builders import analysis_for as build_analysis, good_option
+
+    trip = add_trip(conn)
+    text = render_comparison(compare_cabins([build_analysis(trip, [good_option()], baseline_value=None, cabin=Cabin.BUSINESS)], TODAY))
+
+    row = next(l for l in text.splitlines() if l.lstrip().startswith("business"))
+    assert "71,800 miles + $305 taxes (~$1,023)" in row and "plus their taxes and fees" in text

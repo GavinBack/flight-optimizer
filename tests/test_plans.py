@@ -54,7 +54,8 @@ def test_the_plan_warns_that_booking_links_may_open_in_the_wrong_cabin(conn):
 def test_taxes_are_shown_with_the_unit_assumption_stated(conn):
     _, text = plan_for(conn)
 
-    assert "about 106.00 CAD" in text and "assumed hundredths" in text
+    assert "about 106.00 CAD (Seats.aero reports 10600, in hundredths)" in text
+    assert "assumed hundredths" not in text        # CAD was checked against aircanada.com
 
 
 def test_the_transfer_step_gives_amounts_and_what_is_left(conn):
@@ -108,7 +109,8 @@ def test_urgency_and_snapshot_warnings_are_up_top(conn):
 def test_headline_shows_value_against_cash(conn):
     _, text = plan_for(conn)
 
-    assert "THE OPTION: 71,800 miles, 3.16 c/mile vs business cash $2,267 (0.97 vs economy cash $699)" in text
+    assert "THE OPTION: 71,800 miles + $305 taxes, 2.73 c/mile vs business cash $2,267 (0.55 vs economy cash $699)" in text
+    assert "converted to dollars at fixed approximate rates" in text and "only CAD is confirmed" in text
     assert "4 bookings." in text
 
 
@@ -304,3 +306,21 @@ def test_a_plan_without_notes_has_no_such_section(conn):
     _, text = plan_for(conn)
 
     assert "OTHER TRIPS" not in text
+
+
+def test_an_unchecked_currency_keeps_the_caution():
+    from dataclasses import replace
+    from flight_optimizer.plans import _taxes_line
+    from builders import leg
+
+    aud = replace(leg("RNO", "LAX", "qantas", 25_000, JAN9), total_taxes=1_410, currency="AUD")
+    usd = replace(aud, currency="USD")
+
+    assert "about 14.10 AUD (Seats.aero reports 1410; assumed hundredths, so confirm on the booking page)" == _taxes_line(aud).split("taxes/fees: ")[1]
+    assert "assumed hundredths" in _taxes_line(usd)
+
+
+def test_the_confirmed_currencies_say_where_they_were_checked():
+    from flight_optimizer.seats_aero import TAX_UNIT_CONFIRMED
+
+    assert set(TAX_UNIT_CONFIRMED) == {"CAD"} and "aircanada.com" in TAX_UNIT_CONFIRMED["CAD"]

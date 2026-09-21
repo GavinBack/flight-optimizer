@@ -25,6 +25,7 @@ from flight_optimizer.alerts import option_key
 from flight_optimizer.analysis import TripAnalysis
 from flight_optimizer.cabins import MILE_VALUE_CENTS, UPGRADE_MAX_MULTIPLE
 from flight_optimizer.programs import PROGRAM_NAMES
+from flight_optimizer.taxes import option_taxes
 from flight_optimizer.joint import build_joint
 from flight_optimizer.promos import Promo
 from flight_optimizer.report import render_joint, render_trip_sections
@@ -58,7 +59,8 @@ cheapest way to fly. Those are the owner's accepted settings; do not argue with 
 of 2.5 hours or more, and current data (3 days or newer is current, over 7 days is stale).
 - Each cabin's section shows its cash history (the typical fare from earlier searches, and the lowest) and \
 any target price the owner set. Use them to judge whether a cash fare is good; with little history, say so.
-- Award data is a cached snapshot, not live. Flight times are local. Award figures exclude taxes and fees.
+- Award data is a cached snapshot, not live. Flight times are local. Award taxes and fees are included in the dollar figures and cents per mile, converted at fixed approximate \
+exchange rates (a + after a tax amount means some could not be converted): treat them as approximate.
 - A trip marked flexible searches awards up to 3 days either side of each date, so an option may be on shifted \
 dates (each option shows its dates). Cash fares are only for the exact requested dates, so compare a shifted \
 award with the cash fare cautiously and say so. Note which shifted dates you would be committing to.
@@ -250,7 +252,8 @@ def fingerprint(
                     "target": a.cash_target,
                     "affordable": len(a.affordable),
                     "options": [
-                        [option_key(o), o.total_miles, o.affordability.affordable, int(o.freshness(today))]
+                        [option_key(o), o.total_miles, round(option_taxes(o).usd / 10), o.affordability.affordable,
+                         int(o.freshness(today))]
                         for o in a.ranked[:FINGERPRINT_OPTIONS]
                     ],
                 }

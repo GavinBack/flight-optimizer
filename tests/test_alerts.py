@@ -81,7 +81,7 @@ def test_the_message_is_a_short_summary_with_urgency_and_a_pointer_to_the_plan(c
 
     lines = alert.message.split("\n")
     assert lines[0] == "RNO > SJO  Jan 09 - Jan 16  (business)"
-    assert lines[1] == "71,800 miles (3.2 c/mile vs $2,267 business cash)"
+    assert lines[1] == "71,800 miles + $305 taxes (2.7 c/mile vs $2,267 business cash)"
     assert lines[2] == "ACT TODAY: RNO>LAX delta has 1 seat left"
     assert "Full steps: python -m flight_optimizer plan 1" in lines[-1]
     assert alert.title == "Costa Rica (business): 71,800 miles"
@@ -160,7 +160,7 @@ def test_the_data_age_is_stated(conn):
 def test_without_a_cash_baseline_the_value_line_is_just_miles(conn):
     _, _, alert = alert_for(conn, [good_option()], baseline_value=None)
 
-    assert alert.message.split("\n")[1] == "71,800 miles"
+    assert alert.message.split("\n")[1] == "71,800 miles + $305 taxes"
 
 
 def test_no_alert_when_nothing_is_affordable(conn):
@@ -639,3 +639,36 @@ def test_the_note_is_asked_about_the_option_being_alerted_on(conn):
     decide_alert(conn, analysis, notes_for=lambda option: asked.append(option) or [])
 
     assert asked == [analysis.affordable[0]]
+
+
+# --- award taxes and the value floor -------------------------------------------------------------------------------
+
+def without_taxes(opt):
+    from dataclasses import replace
+    from flight_optimizer.affordability import TripOption
+    from flight_optimizer.itineraries import Itinerary
+
+    return TripOption(
+        itineraries=tuple(Itinerary(legs=tuple(replace(l, total_taxes=0) for l in it.legs), via=it.via) for it in opt.itineraries),
+        affordability=opt.affordability,
+    )
+
+
+def test_taxes_can_take_an_award_below_a_cent_a_mile(conn):
+    from builders import fare
+    cash = TripBaseline(cabin_fares=(fare(400), fare(400)), economy_fares=(fare(400), fare(400)))    # an $800 business fare
+    trip = add_trip(conn)
+
+    free = analysis_for(trip, [without_taxes(good_option())], baseline_value=cash)       # 71,800 miles: 1.11 c each
+    taxed = analysis_for(trip, [good_option()], baseline_value=cash)                      # after $305 of taxes: 0.69 c each
+
+    assert decide_alert(conn, free) is not None
+    assert decide_alert(conn, taxed) is None and taxed.affordable            # affordable, but the cash fare is the better deal
+
+
+def test_the_value_line_shows_taxes_only_when_there_are_some(conn):
+    trip = add_trip(conn)
+
+    free = decide_alert(conn, analysis_for(trip, [without_taxes(good_option())]))
+
+    assert free.message.split("\n")[1] == "71,800 miles (3.2 c/mile vs $2,267 business cash)"

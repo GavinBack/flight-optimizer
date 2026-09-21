@@ -18,6 +18,7 @@ from flight_optimizer.connections import ConnectionClass
 from flight_optimizer.itineraries import Freshness, is_stale
 from flight_optimizer.promos import Promo
 from flight_optimizer.savings import estimate_value
+from flight_optimizer.taxes import option_taxes
 
 RE_ALERT_DAYS = 7  # don't repeat the same option within this window unless it got cheaper
 URGENT_SEATS = 2  # at most this many seats on any leg: act today
@@ -146,6 +147,9 @@ def build_alert(
     urgency = assess_urgency(option)
 
     value_line = f"{option.total_miles:,} miles"
+    taxes = option_taxes(option)
+    if taxes.usd or not taxes.complete:
+        value_line += f" + {taxes.text}"
     if analysis.baseline is not None:
         value = estimate_value(option, analysis.baseline)
         if value.cents_per_mile_vs_cabin is not None:
@@ -196,8 +200,9 @@ def _parse_time(value: str) -> datetime:
 
 
 def worth_the_miles(analysis: TripAnalysis, option: TripOption) -> bool:
-    """False when the miles would buy less than `MILE_VALUE_CENTS` of cash fare: paying that cabin's
-    cash price is then the better deal. With no cash price to compare, the option is not judged."""
+    """False when the miles would buy less than `MILE_VALUE_CENTS` of cash fare once the award's taxes are
+    paid: paying that cabin's cash price is then the better deal. With no cash price to compare, the
+    option is not judged."""
     if analysis.baseline is None:
         return True
     cents = estimate_value(option, analysis.baseline).cents_per_mile_vs_cabin

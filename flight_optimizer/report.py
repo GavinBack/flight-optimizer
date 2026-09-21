@@ -205,7 +205,7 @@ def _payment_lines(option: TripOption, balances: dict[str, int]) -> list[str]:
     return lines
 
 
-def _miss_text(option: TripOption) -> str:
+def miss_text(option: TripOption) -> str:
     a = option.affordability
     parts = [f"{short:,} short in {program}" for program, short in sorted(a.shortfalls.items())]
     if a.capital_one_short:
@@ -400,7 +400,7 @@ def render_trip(
         out.append("")
         out.append("CLOSEST MISSES  (ordered by how little they're short, not by price)")
         for option, _ in _group_by_shape(misses)[:near_n]:
-            out.append(f"  {option.total_miles:,} miles   {_miss_text(option)}")
+            out.append(f"  {option.total_miles:,} miles   {miss_text(option)}")
             for label, itinerary in zip(("out ", "back"), option.itineraries):
                 out.append(f"      {label}  {_itinerary_text(itinerary)}")
     out.extend(_buy_lines(misses, today, buy_n, baseline.cabin_total if baseline is not None else None, promos))

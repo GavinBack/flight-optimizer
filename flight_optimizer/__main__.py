@@ -7,6 +7,7 @@
     python -m flight_optimizer test-notification    check that ntfy reaches your phone
     python -m flight_optimizer balance [PROGRAM MILES ...]   show balances, or set them
     python -m flight_optimizer gateways [TRIP] [--set|--add|--remove AIRPORT ...]   show or change hubs
+    python -m flight_optimizer digest [--dry-run]   send (or preview) the weekly digest now
     python -m flight_optimizer promos [--no-fetch]   list buy-miles sales (reads the feeds first)
     python -m flight_optimizer promos add PROGRAM --bonus N --ends YYYY-MM-DD [--tier ...]   record one by hand
 
@@ -27,6 +28,7 @@ from flight_optimizer.alerts import (
 from flight_optimizer.analysis import analyze_trip
 from flight_optimizer.cash_fares import SerpApiClient
 from flight_optimizer.config import ConfigError, Settings, load_settings
+from flight_optimizer.digest import alert_counts_for, build_digest, digest_due, record_digest_sent
 from flight_optimizer.itineraries import STALE_AWARD_DAYS
 from flight_optimizer.notify import NtfyClient, NtfyError
 from flight_optimizer.plans import latest_plan, render_plan, save_plan
@@ -87,6 +89,9 @@ def _build_parser() -> argparse.ArgumentParser:
     done.add_argument("trip_id", type=int)
 
     commands.add_parser("test-notification", help="send a test message to your ntfy topic")
+
+    digest = commands.add_parser("digest", help="send the weekly digest now (it is also sent by notify once a week)")
+    digest.add_argument("--dry-run", action="store_true", help="print the digest; send nothing and keep the weekly timer as is")
 
     promos = commands.add_parser("promos", help="list buy-miles sales, refreshing them first")
     promos.add_argument("--no-fetch", action="store_true", help="list what is stored without going online")
@@ -163,8 +168,10 @@ def _run_notify(conn, clients: Clients, plans_dir: Path, *, dry_run: bool, now: 
 
     balances = db.get_balances(conn)
     failed = False
+    analyses = []
     for trip in trips:
         analysis = analyze_trip(conn, clients.awards, clients.cash, trip, balances)
+        analyses.append(analysis)
 
         alert = decide_alert(conn, analysis, now=now)
         if alert is None:
@@ -195,7 +202,47 @@ def _run_notify(conn, clients: Clients, plans_dir: Path, *, dry_run: bool, now: 
                     print(f"{trip['name']}: sale alert sent ({promo_alert.title}).")
             else:
                 failed = True
+
+    if digest_due(conn, now) and not _send_digest(
+        conn, clients, analyses, live_promos, balances, now, dry_run=dry_run
+    ):
+        failed = True
     return 1 if failed else 0
+
+
+def _send_digest(conn, clients: Clients, analyses, live_promos, balances, now: datetime, *, dry_run: bool) -> bool:
+    """Build and deliver the weekly digest. The weekly timer only restarts once it was really sent."""
+    digest = build_digest(
+        analyses,
+        alert_counts=alert_counts_for(conn, analyses, now),  # after this run's alerts, so they are counted
+        promos=live_promos,
+        balances=balances,
+        balance_updates=db.balance_updates(conn),
+        today=now.date(),
+    )
+    if not _send(conn, clients, {"name": "all trips"}, digest, dry_run=dry_run, describe="weekly digest"):
+        return False
+    if not dry_run:
+        record_digest_sent(conn, now)
+        print("Weekly digest sent.")
+    return True
+
+
+def _run_digest(conn, clients: Clients, now: datetime, *, dry_run: bool) -> int:
+    trips = db.active_trips(conn)
+    if not trips:
+        print("No active trips, so there is nothing to summarize.")
+        return 0
+    if not dry_run and clients.ntfy is None:
+        print("error: NTFY_TOPIC is not set. Add it to .env (see .env.example).", file=sys.stderr)
+        return 1
+    if clients.promos is not None:
+        for problem in refresh_promos(conn, clients.promos, now).errors:
+            print(f"note: could not read a sales source: {problem}", file=sys.stderr)
+    balances = db.get_balances(conn)
+    analyses = [analyze_trip(conn, clients.awards, clients.cash, trip, balances) for trip in trips]
+    live_promos = best_promos(active_promos(conn, now.date()))
+    return 0 if _send_digest(conn, clients, analyses, live_promos, balances, now, dry_run=dry_run) else 1
 
 
 def _run_plan(conn, clients: Clients, plans_dir: Path, args, now: datetime) -> int:
@@ -422,6 +469,8 @@ def main(
             )
             print("Test notification sent. Check your phone.")
             return 0
+        if args.command == "digest":
+            return _run_digest(conn, clients, now, dry_run=args.dry_run)
         if args.command == "promos":
             try:
                 return _run_promos(conn, args, clients, now)

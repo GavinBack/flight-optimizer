@@ -24,6 +24,8 @@ from urllib.parse import urlparse
 import feedparser
 import requests
 
+from flight_optimizer import db
+
 USER_AGENT = "flight-optimizer/0.1 (personal use; reads deal feeds once a day)"
 FEEDS = {
     "Live From A Lounge": "https://livefromalounge.com/feed/",
@@ -337,19 +339,6 @@ def active_promos(conn: sqlite3.Connection, today: date) -> list[Promo]:
     return [p for p in (_row_to_promo(r) for r in conn.execute("SELECT * FROM promos")) if p.is_active(today)]
 
 
-def _meta_get(conn: sqlite3.Connection, key: str) -> str | None:
-    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
-    return row["value"] if row else None
-
-
-def _meta_set(conn: sqlite3.Connection, key: str, value: str) -> None:
-    with conn:
-        conn.execute(
-            "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (key, value),
-        )
-
-
 @dataclass
 class RefreshResult:
     skipped: bool = False  # refreshed too recently, nothing fetched
@@ -366,7 +355,7 @@ def refresh_promos(
 
     A feed that can't be reached is reported, not fatal: the other source still runs.
     """
-    last = _meta_get(conn, "promos:last_refresh")
+    last = db.get_meta(conn, "promos:last_refresh")
     if not force and last is not None:
         age = now.astimezone(timezone.utc) - datetime.fromisoformat(last)
         if age < min_interval:
@@ -383,7 +372,7 @@ def refresh_promos(
             continue
         for entry in entries:
             if name == "Live From A Lounge" and re.search(r"buying opportunities", entry.title, re.I):
-                if _meta_get(conn, f"promos:page:{entry.link}") is None:
+                if db.get_meta(conn, f"promos:page:{entry.link}") is None:
                     try:
                         promos = parse_roundup(source.page_text(entry.link), entry.link, today, name)
                     except PromoSourceError as exc:
@@ -391,7 +380,7 @@ def refresh_promos(
                         continue
                     for promo in promos:
                         save_promo(conn, promo)
-                    _meta_set(conn, f"promos:page:{entry.link}", today.isoformat())
+                    db.set_meta(conn, f"promos:page:{entry.link}", today.isoformat())
                     result.pages_read += 1
                     result.new_or_updated += len(promos)
                 continue
@@ -399,6 +388,6 @@ def refresh_promos(
             if promo is not None:
                 save_promo(conn, promo)
                 result.new_or_updated += 1
-    _meta_set(conn, "promos:last_refresh", now.astimezone(timezone.utc).isoformat())
+    db.set_meta(conn, "promos:last_refresh", now.astimezone(timezone.utc).isoformat())
     result.errors = tuple(errors)
     return result

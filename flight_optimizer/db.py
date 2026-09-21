@@ -319,6 +319,28 @@ def set_balance(conn: sqlite3.Connection, program: str, balance: int) -> None:
         )
 
 
+def get_meta(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
+    with conn:
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+
+
+def count_alerts_since(conn: sqlite3.Connection, trip_id: int, since: str) -> dict[str, int]:
+    """Alerts recorded for a trip at or after `since` (UTC ISO), counted by type."""
+    rows = conn.execute(
+        "SELECT alert_type, COUNT(*) AS n FROM alert_history WHERE trip_id = ? AND created_at >= ? GROUP BY alert_type",
+        (trip_id, since),
+    )
+    return {row["alert_type"]: row["n"] for row in rows}
+
+
 def delete_manual_promos(conn: sqlite3.Connection, program: str) -> int:
     """Remove the sales added by hand for a program. Sales read from feeds are left alone."""
     with conn:

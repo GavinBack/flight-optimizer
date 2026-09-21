@@ -83,6 +83,10 @@ def env(monkeypatch, tmp_path):
     db.set_gateways(conn, trip_id, ["LAX"])
     db.set_balance(conn, "delta", 30_000)
     db.set_balance(conn, "capital_one", 100_000)
+    # The first weekly digest is due immediately. These tests are about alerts, so start with it
+    # already sent; the digest tests below reset this.
+    from flight_optimizer.digest import record_digest_sent
+    record_digest_sent(conn, datetime.now())
     yield conn, tmp_path
     conn.close()
 
@@ -844,3 +848,165 @@ def test_the_list_shows_one_entry_per_program_preferring_the_one_with_tiers(env,
 
     out = capsys.readouterr().out
     assert out.count("Air Canada Aeroplan") == 1 and "5,000-25,000: 50%" in out and "headline only" not in out
+
+
+
+# --- the weekly digest ---------------------------------------------------------------------------------------------------
+
+from flight_optimizer.digest import digest_due  # noqa: E402
+
+
+def digests(ntfy):
+    return [m for m in ntfy.sent if m["title"].startswith("Weekly flight check")]
+
+
+def make_digest_due(conn):
+    conn.execute("DELETE FROM meta WHERE key = 'digest:last_sent'")
+    conn.commit()
+
+
+def test_notify_sends_the_first_digest_and_remembers_it(env, capsys):
+    conn, tmp_path = env
+    make_digest_due(conn)
+
+    code, _, ntfy = run(["notify"], tmp_path)
+
+    assert code == 0 and len(digests(ntfy)) == 1
+    sent = digests(ntfy)[0]
+    assert sent["title"] == "Weekly flight check: Costa Rica" and sent["priority"] == 2 and sent["tags"] == ("calendar",)
+    assert "Full report: python -m flight_optimizer report" in sent["message"]
+    assert not digest_due(conn, datetime.now()) and "Weekly digest sent." in capsys.readouterr().out
+
+
+def test_the_digest_is_not_repeated_within_a_week(env):
+    conn, tmp_path = env
+    make_digest_due(conn)
+    _, _, ntfy = run(["notify"], tmp_path)
+
+    run(["notify"], tmp_path, ntfy=ntfy)
+
+    assert len(digests(ntfy)) == 1
+
+
+def test_it_comes_round_again_after_seven_days(env):
+    conn, tmp_path = env
+    make_digest_due(conn)
+    _, _, ntfy = run(["notify"], tmp_path)
+    eight_days_ago = (datetime.now() - timedelta(days=8)).astimezone().isoformat()
+    db.set_meta(conn, "digest:last_sent", eight_days_ago)
+
+    run(["notify"], tmp_path, ntfy=ntfy)
+
+    assert len(digests(ntfy)) == 2
+
+
+def test_the_digest_follows_the_alerts_and_counts_them(env):
+    conn, tmp_path = env
+    make_digest_due(conn)
+
+    _, _, ntfy = run(["notify"], tmp_path)
+
+    titles = [m["title"] for m in ntfy.sent]
+    assert titles[0] == "Costa Rica: 71,800 miles" and titles[-1].startswith("Weekly flight check")
+    assert "Alerts sent in the last 7 days: 1 award." in digests(ntfy)[0]["message"]
+
+
+def test_a_dry_run_shows_the_digest_but_neither_sends_it_nor_starts_the_timer(env, capsys):
+    conn, tmp_path = env
+    make_digest_due(conn)
+
+    _, _, ntfy = run(["notify", "--dry-run"], tmp_path)
+
+    out = capsys.readouterr().out
+    assert "would send for all trips: weekly digest" in out and "Weekly flight check: Costa Rica" in out
+    assert ntfy.sent == [] and digest_due(conn, datetime.now())
+
+
+def test_a_failed_digest_is_not_recorded_so_it_is_retried(env, capsys):
+    conn, tmp_path = env
+    make_digest_due(conn)
+
+    code, _, _ = run(["notify"], tmp_path, ntfy=FakeNtfy(fail=True))
+
+    assert code == 1 and digest_due(conn, datetime.now())
+    assert "could not send the weekly digest" in capsys.readouterr().err
+    _, _, working = run(["notify"], tmp_path)
+    assert len(digests(working)) == 1
+
+
+def test_no_digest_without_active_trips(env):
+    conn, tmp_path = env
+    make_digest_due(conn)
+    db.set_trip_active(conn, 1, False)
+
+    _, _, ntfy = run(["notify"], tmp_path)
+
+    assert ntfy.sent == []
+
+
+def test_the_digest_says_when_the_only_options_are_stale(env):
+    conn, tmp_path = env
+    make_digest_due(conn)
+
+    _, _, ntfy = run(["notify"], tmp_path, awards=stale_awards())
+
+    message = digests(ntfy)[0]["message"]
+    assert "1 affordable award option: 0 current, 0 aging, 1 stale." in message
+    assert "That is silence, not an absence of options." in message
+    assert [m for m in ntfy.sent if not m["title"].startswith("Weekly")] == []   # no award alert, as designed
+
+
+def test_the_digest_never_contains_balance_amounts(env):
+    conn, tmp_path = env
+    make_digest_due(conn)
+
+    _, _, ntfy = run(["notify"], tmp_path)
+
+    message = digests(ntfy)[0]["message"]
+    for amount in ("30,000", "100,000", "30000", "100000"):
+        assert amount not in message
+
+
+def test_the_digest_command_sends_now_even_if_one_went_out_today(env, capsys):
+    conn, tmp_path = env    # the fixture already recorded a digest as sent just now
+
+    code, _, ntfy = run(["digest"], tmp_path)
+
+    assert code == 0 and len(ntfy.sent) == 1 and ntfy.sent[0]["title"].startswith("Weekly flight check")
+    assert "Weekly digest sent." in capsys.readouterr().out
+
+
+def test_the_digest_command_dry_run_prints_without_sending_or_resetting_the_timer(env, capsys):
+    conn, tmp_path = env
+    make_digest_due(conn)
+
+    code, _, ntfy = run(["digest", "--dry-run"], tmp_path)
+
+    assert code == 0 and ntfy.sent == [] and digest_due(conn, datetime.now())
+    assert "Weekly flight check: Costa Rica" in capsys.readouterr().out
+
+
+def test_the_digest_command_without_a_topic_is_an_error_unless_a_dry_run(env, capsys):
+    _, tmp_path = env
+
+    assert run(["digest"], tmp_path, ntfy=None)[0] == 1
+    assert "NTFY_TOPIC is not set" in capsys.readouterr().err
+    assert run(["digest", "--dry-run"], tmp_path, ntfy=None)[0] == 0
+
+
+def test_the_digest_command_with_no_active_trips_says_so(env, capsys):
+    conn, tmp_path = env
+    db.set_trip_active(conn, 1, False)
+
+    code, _, ntfy = run(["digest"], tmp_path)
+
+    assert code == 0 and ntfy.sent == [] and "nothing to summarize" in capsys.readouterr().out
+
+
+def test_a_failed_digest_command_exits_nonzero_and_does_not_reset_the_timer(env):
+    conn, tmp_path = env
+    make_digest_due(conn)
+
+    code, _, _ = run(["digest"], tmp_path, ntfy=FakeNtfy(fail=True))
+
+    assert code == 1 and digest_due(conn, datetime.now())

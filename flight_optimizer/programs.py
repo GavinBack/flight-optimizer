@@ -4,7 +4,7 @@ import re
 from datetime import date, datetime
 
 from flight_optimizer import db
-from flight_optimizer.affordability import CAPITAL_ONE_TRANSFERS
+from flight_optimizer.affordability import CAPITAL_ONE_TRANSFERS, ratio_text
 
 PROGRAM_NAMES = {
     "capital_one": "Capital One Miles",
@@ -33,6 +33,7 @@ ALIASES = {
     "airfrance": "flyingblue", "klm": "flyingblue",
     "avianca": "lifemiles",
     "aircanada": "aeroplan",
+    "virginred": "virginatlantic", "flyingclub": "virginatlantic", "virgin": "virginatlantic",
 }
 
 STALE_AFTER_DAYS = 30  # a balance not touched for this long is flagged as possibly out of date
@@ -81,7 +82,7 @@ def format_balances(balances: dict[str, int], updated: dict[str, str], *, today:
         if key == "capital_one":
             notes.append("transferable pool")
         if key in CAPITAL_ONE_TRANSFERS:
-            notes.append("Capital One transfer 1:1")
+            notes.append(f"Capital One transfer {ratio_text(key)}")
         if key in updated:
             set_on = datetime.strptime(updated[key], "%Y-%m-%dT%H:%M:%SZ").date()
             when = set_on.isoformat()

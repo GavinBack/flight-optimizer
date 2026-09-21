@@ -23,6 +23,7 @@ def test_every_alias_points_at_a_real_program():
     ("skymiles", "delta"), ("MileagePlus", "united"), ("Alaska", "atmos"), ("avios", "british"),
     ("Air Canada Aeroplan", "aeroplan"), ("avianca", "lifemiles"), ("klm", "flyingblue"),
     ("c1", "capital_one"), ("Qantas Frequent Flyer", "qantas"),
+    ("Virgin Red", "virginatlantic"), ("virgin-red", "virginatlantic"), ("Flying Club", "virginatlantic"),
 ])
 def test_resolves_keys_names_and_aliases(typed, expected):
     assert resolve_program(typed) == expected
@@ -111,3 +112,11 @@ def test_transfer_notes_are_shown_for_capital_one_and_its_partners():
     assert "transferable pool" in next(l for l in lines if l.startswith("Capital One"))
     assert "Capital One transfer 1:1" in next(l for l in lines if l.startswith("Air Canada Aeroplan"))
     assert "transfer" not in next(l for l in lines if l.startswith("Delta"))
+
+
+def test_each_transfer_partner_shows_its_own_ratio_not_a_blanket_one_to_one():
+    lines = table({}, {})
+
+    assert "Capital One transfer 5:3" in next(l for l in lines if l.startswith("JetBlue"))
+    for name in ("Air Canada Aeroplan", "Qantas", "Virgin Atlantic", "British Airways", "Avianca", "Air France"):
+        assert "Capital One transfer 1:1" in next(l for l in lines if l.startswith(name))

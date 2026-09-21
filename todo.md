@@ -146,11 +146,13 @@ Separate alert type. It depends on at least one active trip.
 
 Nice-to-haves once the core alerting works. Item 7.3 overlaps with section 5 (v3 web UI), so build them as one.
 
-- [ ] **Claude API advisor.** Add the Claude API so the app can reason over the ranked options, recommend actions, and lay out the pros and cons of each option (e.g. "transfer 50,000 to Aeroplan now, or wait for a cheaper Alaska leg").
-  - [ ] Keep the arithmetic (affordability, transfers, savings, cents per mile) in code. Send Claude the computed results and use it for judgment and explanation only.
-  - [ ] Send only the top N options plus balances, cash prices and savings, to keep each call small.
-  - [ ] Add `ANTHROPIC_API_KEY` to `.env` and `.env.example`. This is pay-per-use API billing (no subscription), so estimate the monthly cost first.
-  - [ ] Have it flag risks the data can't settle, such as unverified connection times, cached data age, and irreversible Capital One transfers.
+- [x] **Claude API advisor** (2026-09-21): `python -m flight_optimizer advise [TRIP] [--dry-run]` (`advisor.py`). On demand only, so it costs nothing unless you run it.
+  - [x] Arithmetic stays in code. Claude gets the computed report (top 3 options per cabin, cash fares, savings, the cabin comparison, and your balances) and gives judgment and explanation only. When two trips are shown it is told the tool has not checked them against each other, and to say so.
+  - [x] Small calls: about 12,600 input tokens for both trips (measured on the first live call; `--dry-run` shows the estimate) and 4,150 output tokens that call used, counting thinking, with a cap of 8,000 (the model thinks before it answers, and thinking counts toward that limit; the answer itself is about 450 words). At Sonnet-class prices (roughly $3 per million tokens in and $15 out; not confirmed for `claude-sonnet-5`, so check the console) that is about 10 cents a call (12.6k in, 4.2k out), or about $3 a month at one call a day.
+  - [x] `ANTHROPIC_API_KEY` (and optional `ANTHROPIC_MODEL`) added to `.env.example`. Pay-per-use billing: set a spend limit in the Anthropic console.
+  - [x] It is asked to flag risks the data cannot settle (data age, unverified connections, self-transfers, slow or irreversible transfers, taxes and fees) and what would change its advice.
+  - [ ] Not done: advice is not attached to alerts or the weekly digest (kept off so nothing spends money unattended). Consider adding it to the digest once you have seen how useful the output is.
+  - [ ] Not done: advice is not saved or compared between runs.
 - [ ] **Two trips at a time.** Started: each active trip is now evaluated on its own against the SAME balances. NOT done: nothing yet checks the trips against each other, so both could be recommended options that together need more Capital One miles than exist (Costa Rica's best already moves 79,000 of the 115,519).
   - Kelowna finding (2026-09-21): no direct RNO-YLW award route exists; SEA, LAX and PHX connect both ends. **Zero affordable award options.** The space is almost all Alaska, which needs Atmos points you do not have and Capital One cannot supply; the cheapest gaps to close are thousands of dollars (a 1-hour hop at 27,500 to 35,000 miles a leg). The cash through-ticket is the realistic option ($1,067 economy, $1,809 business, holiday fares). Economy awards are cheap in miles (RNO>SEA from 5,000) but roughly 70,000 Atmos points for the round trip would cost far more to buy than the cash fare (rough, from retail estimates).
   - [ ] The trip dates were given as approximate ("~"). Dates are exact today: a flexible window (e.g. plus or minus 2 days, searching each day) is not modeled and could turn up space on neighboring days.

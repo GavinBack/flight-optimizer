@@ -5,7 +5,7 @@ from datetime import date
 
 from flight_optimizer import db
 from flight_optimizer.affordability import SOURCE_TO_PROGRAM, TripOption, slow_transfers
-from flight_optimizer.analysis import analyze_trip_cabins
+from flight_optimizer.analysis import TripAnalysis, analyze_trip_cabins
 from flight_optimizer.cabins import (
     MILE_VALUE_CENTS, UPGRADE_MAX_MULTIPLE, CabinComparison, cabin_label, compare_cabins,
 )
@@ -455,6 +455,30 @@ def render_trip(
     return "\n".join(out)
 
 
+def render_trip_sections(
+    analyses: list[TripAnalysis],
+    balances: dict[str, int],
+    *,
+    promos: dict[str, Promo] | None = None,
+    today: date | None = None,
+    top_n: int = 5,
+    near_n: int = 3,
+    buy_n: int = 3,
+) -> list[str]:
+    """One trip's report text: the cabin comparison, then a section per cabin. `analyses` are that
+    trip's per-cabin analyses."""
+    sections = [render_comparison(compare_cabins(analyses, today or date.today()))]
+    for analysis in analyses:
+        sections.append(
+            render_trip(
+                analysis.trip, analysis.gateways, analysis.ranked, analysis.baseline, balances,
+                cash_note=analysis.cash_note, stats=analysis.stats, cabin=analysis.cabin,
+                top_n=top_n, near_n=near_n, buy_n=buy_n, promos=promos, today=today,
+            )
+        )
+    return sections
+
+
 def build_report(
     conn: sqlite3.Connection,
     awards: SeatsAeroClient,
@@ -474,15 +498,9 @@ def build_report(
     sections = []
     for trip in trips:
         analyses = analyze_trip_cabins(conn, awards, cash, trip, balances)
-        sections.append(render_comparison(compare_cabins(analyses, today or date.today())))
-        for analysis in analyses:
-            sections.append(
-                render_trip(
-                    trip, analysis.gateways, analysis.ranked, analysis.baseline, balances,
-                    cash_note=analysis.cash_note, stats=analysis.stats, cabin=analysis.cabin,
-                    top_n=top_n, near_n=near_n, promos=live_promos, today=today,
-                )
-            )
+        sections += render_trip_sections(
+            analyses, balances, promos=live_promos, today=today, top_n=top_n, near_n=near_n
+        )
 
     usage = []
     if awards.calls_remaining is not None:

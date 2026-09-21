@@ -91,11 +91,12 @@ def env(monkeypatch, tmp_path):
     conn.close()
 
 
-def run(argv, tmp_path, *, ntfy="default", awards=None, promos=None):
+def run(argv, tmp_path, *, ntfy="default", awards=None, promos=None, advisor=None):
     awards = awards or FakeAwards()
     ntfy_client = FakeNtfy() if ntfy == "default" else ntfy
     code = main(argv, env_file=None, plans_dir=tmp_path / "plans",
-                clients_factory=lambda settings, conn, fresh: Clients(awards=awards, cash=None, ntfy=ntfy_client, promos=promos))
+                clients_factory=lambda settings, conn, fresh: Clients(
+                    awards=awards, cash=None, ntfy=ntfy_client, promos=promos, advisor=advisor))
     return code, awards, ntfy_client
 
 
@@ -1224,3 +1225,108 @@ def test_trip_commands_need_no_api_clients(env):
         raise AssertionError("local commands must not build API clients")
 
     assert main(["trip"], env_file=None, plans_dir=tmp_path / "plans", clients_factory=exploding_factory) == 0
+
+
+# --- the Claude advisor ---------------------------------------------------------------------------------------
+
+class FakeAdvisor:
+    model = "claude-sonnet-5"
+
+    def __init__(self, text="RECOMMENDATION: take economy.", truncated=False, error=None):
+        self.text, self.truncated, self.error, self.briefs = text, truncated, error, []
+
+    def advise(self, brief, **_):
+        from flight_optimizer.advisor import Advice
+        self.briefs.append(brief)
+        if self.error:
+            raise self.error
+        return Advice(text=self.text, model=self.model, input_tokens=4000, output_tokens=500, truncated=self.truncated)
+
+
+def test_advise_sends_the_computed_report_and_prints_the_answer(env, capsys):
+    _, tmp_path = env
+    advisor = FakeAdvisor()
+
+    code, _, _ = run(["advise"], tmp_path, awards=both_cabins(), advisor=advisor)
+
+    out = capsys.readouterr().out
+    assert code == 0 and "RECOMMENDATION: take economy." in out
+    assert "Asking Claude (claude-sonnet-5) about 1 trip" in out and "4,000 tokens in, 500 out" in out
+    (brief,) = advisor.briefs
+    assert "CABINS AT A GLANCE" in brief and "17,950 miles" in brief and "71,800 miles" in brief
+    assert "Delta SkyMiles 30,000" in brief          # balances are part of what is sent
+
+
+def test_advise_covers_every_active_trip_in_one_call(env):
+    conn, tmp_path = env
+    db.add_trip(conn, name="Kelowna", origin="RNO", destination="YLW", depart_date=JAN9, return_date=JAN16, active=True)
+    advisor = FakeAdvisor()
+
+    run(["advise"], tmp_path, advisor=advisor)
+
+    assert len(advisor.briefs) == 1
+    assert "Costa Rica" in advisor.briefs[0] and "Kelowna" in advisor.briefs[0]
+
+
+def test_advise_can_be_limited_to_one_trip(env):
+    conn, tmp_path = env
+    db.add_trip(conn, name="Kelowna", origin="RNO", destination="YLW", depart_date=JAN9, return_date=JAN16, active=True)
+    advisor = FakeAdvisor()
+
+    run(["advise", "2"], tmp_path, advisor=advisor)
+
+    assert "Kelowna" in advisor.briefs[0] and "Costa Rica" not in advisor.briefs[0]
+
+
+def test_advise_dry_run_shows_everything_that_would_be_sent_and_sends_nothing(env, capsys):
+    _, tmp_path = env
+    advisor = FakeAdvisor()
+
+    code, _, _ = run(["advise", "--dry-run"], tmp_path, awards=both_cabins(), advisor=advisor)
+
+    out = capsys.readouterr().out
+    assert code == 0 and advisor.briefs == []
+    assert "SYSTEM PROMPT" in out and "MESSAGE" in out and "Balances (miles or points)" in out
+    assert "nothing was sent" in out and "input tokens" in out
+
+
+def test_advise_dry_run_needs_no_api_key(env):
+    _, tmp_path = env
+
+    assert run(["advise", "--dry-run"], tmp_path, advisor=None)[0] == 0
+
+
+def test_advise_without_a_key_says_how_to_set_one_and_searches_nothing(env, capsys):
+    _, tmp_path = env
+
+    code, awards, _ = run(["advise"], tmp_path, advisor=None)
+
+    assert code == 1 and "ANTHROPIC_API_KEY is not set" in capsys.readouterr().err
+    assert awards.searched == []
+
+
+def test_advise_reports_an_api_failure_cleanly(env, capsys):
+    from flight_optimizer.advisor import AdvisorError
+    _, tmp_path = env
+
+    code, _, _ = run(["advise"], tmp_path, advisor=FakeAdvisor(error=AdvisorError("Claude returned HTTP 429: rate limited")))
+
+    assert code == 1 and "HTTP 429" in capsys.readouterr().err
+
+
+def test_advise_says_when_the_answer_was_cut_off(env, capsys):
+    _, tmp_path = env
+
+    run(["advise"], tmp_path, advisor=FakeAdvisor(truncated=True))
+
+    assert "cut off at the length limit" in capsys.readouterr().out
+
+
+def test_advise_with_no_active_trips_does_nothing(env, capsys):
+    conn, tmp_path = env
+    db.set_trip_active(conn, 1, False)
+    advisor = FakeAdvisor()
+
+    code, _, _ = run(["advise"], tmp_path, advisor=advisor)
+
+    assert code == 0 and advisor.briefs == [] and "nothing to advise on" in capsys.readouterr().out

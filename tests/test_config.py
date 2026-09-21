@@ -54,3 +54,17 @@ def test_reads_env_file(monkeypatch, tmp_path):
     env_file.write_text("SEATS_AERO_API_KEY=from-file\n")
 
     assert load_settings(env_file=env_file).seats_aero_api_key == "from-file"
+
+
+def test_the_claude_advisor_is_optional_and_its_model_can_be_chosen(monkeypatch):
+    monkeypatch.setenv("SEATS_AERO_API_KEY", "abc123")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+
+    settings = load_settings(env_file=None)
+    assert settings.anthropic_api_key is None and settings.anthropic_model == "claude-sonnet-5"
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", " sk-test ")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-opus-5")
+    settings = load_settings(env_file=None)
+    assert settings.anthropic_api_key == "sk-test" and settings.anthropic_model == "claude-opus-5"

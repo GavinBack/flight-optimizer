@@ -20,6 +20,9 @@ class Settings:
     # ntfy alerts. The topic acts as a password on the public server, so keep it secret.
     ntfy_topic: str | None = None
     ntfy_server: str = "https://ntfy.sh"
+    # The Claude advisor (pay-per-use API billing). Optional: everything else works without it.
+    anthropic_api_key: str | None = None
+    anthropic_model: str = "claude-sonnet-5"
 
 
 def load_settings(env_file: Path | str | None = ".env") -> Settings:
@@ -42,4 +45,6 @@ def load_settings(env_file: Path | str | None = ".env") -> Settings:
         serpapi_api_key=os.environ.get("SERPAPI_API_KEY", "").strip() or None,
         ntfy_topic=os.environ.get("NTFY_TOPIC", "").strip() or None,
         ntfy_server=os.environ.get("NTFY_SERVER", "").strip().rstrip("/") or "https://ntfy.sh",
+        anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", "").strip() or None,
+        anthropic_model=os.environ.get("ANTHROPIC_MODEL", "").strip() or "claude-sonnet-5",
     )

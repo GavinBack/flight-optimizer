@@ -3,6 +3,7 @@
     python -m flight_optimizer [report] [--top N]   report on every active trip
     python -m flight_optimizer notify [--dry-run]   alert (via ntfy) on anything new
     python -m flight_optimizer plan [TRIP] [--refresh]   show the booking plan
+    python -m flight_optimizer advise [TRIP] [--dry-run]   ask Claude to weigh the options (paid API)
     python -m flight_optimizer done TRIP            mark a trip booked (stops alerts)
     python -m flight_optimizer test-notification    check that ntfy reaches your phone
     python -m flight_optimizer trip [list|add|set]   see, add or change trips
@@ -23,6 +24,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from flight_optimizer import db
+from flight_optimizer.advisor import SYSTEM_PROMPT, AdvisorError, AnthropicClient, build_brief, estimate_tokens
 from flight_optimizer.alerts import (
     assess_urgency, decide_alert, decide_promo_alert, decide_upgrade_alert, record_promo_sent, record_sent,
     record_upgrade_sent, usable_for_alert,
@@ -53,6 +55,7 @@ class Clients:
     cash: SerpApiClient | None
     ntfy: NtfyClient | None
     promos: PromoSource | None = None  # None: never go online for sales (tests, or by choice)
+    advisor: AnthropicClient | None = None  # None: no ANTHROPIC_API_KEY, so no `advise`
 
 
 def default_clients(settings: Settings, conn, fresh: bool = False) -> Clients:
@@ -65,6 +68,10 @@ def default_clients(settings: Settings, conn, fresh: bool = False) -> Clients:
         cash=SerpApiClient(settings.serpapi_api_key) if settings.serpapi_api_key else None,
         ntfy=NtfyClient(settings.ntfy_topic, server=settings.ntfy_server) if settings.ntfy_topic else None,
         promos=PromoSource(),
+        advisor=(
+            AnthropicClient(settings.anthropic_api_key, model=settings.anthropic_model)
+            if settings.anthropic_api_key else None
+        ),
     )
 
 
@@ -91,6 +98,12 @@ def _build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--refresh", action="store_true", help="search again and rebuild the plan first")
     plan.add_argument("--cabin", choices=[c.name.lower() for c in EVALUATED_CABINS],
                       help="only this cabin (default: the latest saved plan, or with --refresh one per cabin)")
+
+    advise = commands.add_parser(
+        "advise", help="ask Claude to weigh the options for your trips (uses the paid Claude API)"
+    )
+    advise.add_argument("trip_id", nargs="?", type=int, help="omit to advise on every active trip in one call")
+    advise.add_argument("--dry-run", action="store_true", help="print exactly what would be sent; send nothing, spend nothing")
 
     done = commands.add_parser("done", help="mark a trip booked, so it stops being searched and alerted on")
     done.add_argument("trip_id", type=int)
@@ -299,6 +312,37 @@ def _run_digest(conn, clients: Clients, now: datetime, *, dry_run: bool) -> int:
     analyses = [a for trip in trips for a in analyze_trip_cabins(conn, clients.awards, clients.cash, trip, balances)]
     live_promos = best_promos(active_promos(conn, now.date()))
     return 0 if _send_digest(conn, clients, analyses, live_promos, balances, now, dry_run=dry_run) else 1
+
+
+def _run_advise(conn, clients: Clients, args, now: datetime) -> int:
+    trips = [_pick_trip(conn, args.trip_id)] if args.trip_id is not None else db.active_trips(conn)
+    if not trips:
+        print("No active trips, so there is nothing to advise on.")
+        return 0
+    if not args.dry_run and clients.advisor is None:
+        print("error: ANTHROPIC_API_KEY is not set. Add it to .env (see .env.example).", file=sys.stderr)
+        return 1
+
+    balances = db.get_balances(conn)
+    live_promos = best_promos(active_promos(conn, now.date()))
+    analyses = [analyze_trip_cabins(conn, clients.awards, clients.cash, trip, balances) for trip in trips]
+    brief = build_brief(analyses, balances, promos=live_promos, today=now.date())
+    size = estimate_tokens(SYSTEM_PROMPT + brief)
+
+    if args.dry_run:
+        print("SYSTEM PROMPT\n" + SYSTEM_PROMPT + "\n\nMESSAGE\n" + brief)
+        print(f"\nDry run: about {size:,} input tokens; nothing was sent. Balances are included above.")
+        return 0
+
+    print(f"Asking Claude ({clients.advisor.model}) about {len(trips)} trip{'s' if len(trips) != 1 else ''} "
+          f"(about {size:,} input tokens)...\n")
+    advice = clients.advisor.advise(brief)
+    print(advice.text)
+    if advice.truncated:
+        print("\n[The answer was cut off at the length limit.]")
+    print(f"\nAdvice from {advice.model}: {advice.input_tokens:,} tokens in, {advice.output_tokens:,} out. "
+          "It is judgment over the computed figures, not a booking instruction: verify before transferring miles.")
+    return 0
 
 
 def _run_plan(conn, clients: Clients, plans_dir: Path, args, now: datetime) -> int:
@@ -589,9 +633,11 @@ def main(
             return _run_notify(conn, clients, plans_dir, dry_run=args.dry_run, now=now)
         if args.command == "plan":
             return _run_plan(conn, clients, plans_dir, args, now)
+        if args.command == "advise":
+            return _run_advise(conn, clients, args, now)
         print(build_report(conn, clients.awards, clients.cash, top_n=args.top))
         return 0
-    except (SeatsAeroError, NtfyError, LookupError) as exc:
+    except (SeatsAeroError, NtfyError, AdvisorError, LookupError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 

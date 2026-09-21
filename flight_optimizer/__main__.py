@@ -47,6 +47,7 @@ from flight_optimizer.promos import (
 from flight_optimizer.buying import RETAIL_PRICES
 from flight_optimizer.programs import PROGRAM_NAMES, format_balances, parse_miles, resolve_program
 from flight_optimizer.trips import add_trip, format_trips, parse_date
+from flight_optimizer.windows import FLEXIBLE_WINDOW_DAYS
 from flight_optimizer.report import build_report
 from flight_optimizer.seats_aero import SeatsAeroClient, SeatsAeroError
 from flight_optimizer.seats_cache import CachedSeatsAero
@@ -145,13 +146,18 @@ def _build_parser() -> argparse.ArgumentParser:
     add_trip_parser.add_argument("--return", dest="return_date", metavar="YYYY-MM-DD", help="omit for a one-way trip")
     add_trip_parser.add_argument("--gateways", nargs="+", default=[], metavar="AIRPORT",
                                  help="hub airports to route through when origin and destination have no direct award route")
+    add_trip_parser.add_argument("--flexible", action="store_true",
+                                 help=f"also search {FLEXIBLE_WINDOW_DAYS} days either side of each date (awards only; default: exact dates)")
     add_trip_parser.add_argument("--inactive", action="store_true", help="save it without searching or alerting on it yet")
-    set_trip = trip_actions.add_parser("set", help="change a trip's name, dates, or whether it is active")
+    set_trip = trip_actions.add_parser("set", help="change a trip's name, dates, flexibility, or whether it is active")
     set_trip.add_argument("trip_id", type=int)
     set_trip.add_argument("--name")
     set_trip.add_argument("--depart", metavar="YYYY-MM-DD")
     set_trip.add_argument("--return", dest="return_date", metavar="YYYY-MM-DD")
     set_trip.add_argument("--one-way", action="store_true", help="drop the return leg")
+    window = set_trip.add_mutually_exclusive_group()
+    window.add_argument("--flexible", action="store_true", help=f"search {FLEXIBLE_WINDOW_DAYS} days either side of each date")
+    window.add_argument("--exact", action="store_true", help="search the exact dates only")
     state = set_trip.add_mutually_exclusive_group()
     state.add_argument("--active", action="store_true", help="search and alert on this trip")
     state.add_argument("--inactive", action="store_true", help="stop searching and alerting on this trip")
@@ -445,13 +451,15 @@ def _run_trip(conn, args) -> int:
         return_date = parse_date(args.return_date, "--return") if args.return_date else None
         trip_id = add_trip(
             conn, name=args.name, origin=args.origin, destination=args.destination, depart_date=depart,
-            return_date=return_date, gateways=args.gateways, active=not args.inactive,
+            return_date=return_date, gateways=args.gateways, active=not args.inactive, flexible=args.flexible,
         )
         trip = conn.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
         gateways = db.get_gateways(conn, trip_id)
         print(f"Added trip {trip_id}: {trip['name']}, {trip['origin']} > {trip['destination']}, "
               f"{depart:%b %d %Y}" + (f" - {return_date:%b %d %Y}" if return_date else " (one way)")
-              + ", priced in economy, premium economy and business.")
+              + ", priced in economy, premium economy and business."
+              + (f" Flexible: awards are searched {FLEXIBLE_WINDOW_DAYS} days either side of each date."
+                 if trip["flexible"] else " Exact dates."))
         print(f"Gateways: {', '.join(gateways) if gateways else 'none'}")
         if not gateways:
             print(f"No gateways: only the direct {trip['origin']} > {trip['destination']} pair is searched, "
@@ -469,10 +477,11 @@ def _run_trip(conn, args) -> int:
         depart_date=parse_date(args.depart, "--depart") if args.depart else None,
         return_date=parse_date(args.return_date, "--return") if args.return_date else None,
         one_way=args.one_way, active=active,
+        flexible=True if args.flexible else False if args.exact else None,
     )
-    given = (args.name, args.depart, args.return_date, args.one_way, args.active, args.inactive)
+    given = (args.name, args.depart, args.return_date, args.one_way, args.active, args.inactive, args.flexible, args.exact)
     if not any(given):   # judged from what was typed: --inactive means "change it", though its value is False
-        print("Nothing to change: give at least one of --name, --depart, --return, --one-way, --active, --inactive.")
+        print("Nothing to change: give at least one of --name, --depart, --return, --one-way, --flexible, --exact, --active, --inactive.")
         return 1
     db.update_trip(conn, trip["id"], **changes)
     print("Updated.\n")

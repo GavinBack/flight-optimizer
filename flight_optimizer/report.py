@@ -25,6 +25,7 @@ from flight_optimizer.itineraries import (
 from flight_optimizer.promos import Promo, active_promos, best_promos
 from flight_optimizer.savings import TripBaseline, estimate_value
 from flight_optimizer.seats_aero import AwardResult, Cabin, SeatsAeroClient
+from flight_optimizer.windows import window_note
 
 RULE = "=" * 78
 
@@ -123,12 +124,31 @@ def _shape(option: TripOption) -> tuple:
     )
 
 
-def _group_by_shape(options: list[TripOption]) -> list[tuple[TripOption, int]]:
-    """Ranked options with same-shape date variants folded into (first, variant_count)."""
+def _group_by_shape(options: list[TripOption]) -> list[tuple[TripOption, list[TripOption]]]:
+    """Ranked options with same-shape date variants folded into (first, the other variants)."""
     groups: dict[tuple, list[TripOption]] = {}
     for option in options:
         groups.setdefault(_shape(option), []).append(option)
-    return [(members[0], len(members) - 1) for members in groups.values()]
+    return [(members[0], members[1:]) for members in groups.values()]
+
+
+def _option_dates(option: TripOption) -> str:
+    """The travel dates of an option, e.g. "Jan 07 - Jan 14" (the days its first flights leave)."""
+    text = f"{option.depart_date:%b %d}"
+    if option.return_date is not None:
+        text += f" - {option.return_date:%b %d}"
+    return text
+
+
+def _variants_text(option: TripOption, variants: list[TripOption]) -> str:
+    """"(+2 other date combinations at the same price: Jan 06 - Jan 13, ...)". The dates are listed only
+    when they differ from the shown option's: with flexible dates that is the point of the line."""
+    n = len(variants)
+    others = list(dict.fromkeys(d for v in variants if (d := _option_dates(v)) != _option_dates(option)))
+    listed = ""
+    if others:
+        listed = ": " + ", ".join(others[:5]) + (f", +{len(others) - 5} more" if len(others) > 5 else "")
+    return f"(+{n} other date combination{'s' if n > 1 else ''} at the same price{listed})"
 
 
 def _leg_name(leg: AwardResult) -> str:
@@ -357,6 +377,11 @@ def render_comparison(comparison: CabinComparison) -> str:
         " Only awards you can afford on non-stale data count."
     )
     out.append("  Miles and status earned by a better cabin are not counted, so real upgrades cost less than shown.")
+    if trip["flexible"]:
+        out.append(
+            "  Flexible dates: awards may be on shifted dates, but cash fares are for your exact dates only "
+            "(pricing every day would multiply the SerpApi searches)."
+        )
     return "\n".join(out)
 
 
@@ -383,7 +408,7 @@ def render_trip(
         dates += f" - {date.fromisoformat(trip['return_date']):%b %d %Y}"
     cabin_name = cabin_label(cabin)
 
-    out = [RULE, f"{trip['name']}   {trip['origin']} > {trip['destination']}   {dates}   ({cabin_name})"]
+    out = [RULE, f"{trip['name']}   {trip['origin']} > {trip['destination']}   {dates}   ({cabin_name}){window_note(trip)}"]
     out.append("Via gateways: " + (", ".join(gateways) if gateways else "none (direct pairs only)"))
     out.append(RULE)
 
@@ -392,6 +417,8 @@ def render_trip(
         f"CASH BASELINE  (cheapest fare, layovers over {MIN_CONNECTION_MINUTES // 60}h and up to "
         f"{DEFAULT_MAX_LAYOVER_MINUTES // 60}h, total <= {DEFAULT_MAX_TOTAL_MINUTES // 60}h)"
     )
+    if trip["flexible"]:
+        out.append("  Cash fares are for your exact dates. Flexible dates apply to awards only.")
     if baseline is None:
         out.append(f"  {cash_note or 'Cash prices unavailable.'}")
     else:
@@ -424,6 +451,8 @@ def render_trip(
         out.append("  Nothing affordable with current balances. See the closest misses below.")
     for rank, (option, variants) in enumerate(_group_by_shape(affordable)[:top_n], start=1):
         head = f"#{rank}  {option.total_miles:,} miles"
+        if trip["flexible"]:
+            head += f"   {_option_dates(option)}"
         if baseline is not None:
             value = estimate_value(option, baseline)
             if value.cents_per_mile_vs_cabin is not None:
@@ -440,7 +469,7 @@ def render_trip(
         for index, warning in enumerate(_warnings(option, today)):
             out.append(("  check: " if index == 0 else "         ") + warning)
         if variants:
-            out.append(f"  (+{variants} other date combination{'s' if variants > 1 else ''} at the same price)")
+            out.append("  " + _variants_text(option, variants))
 
     out.extend(_cash_ticket_lines(baseline, cabin, affordable[0] if affordable else None))
 

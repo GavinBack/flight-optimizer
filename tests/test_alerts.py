@@ -574,3 +574,34 @@ def test_a_better_cabin_alert_is_not_repeated_within_a_week_unless_it_got_cheape
     cheaper = cabin_analyses(conn, business=(380, 400), trip=trip)
     assert decide_upgrade_alert(conn, cheaper, now=NOW + timedelta(days=2)) is not None
     assert decide_upgrade_alert(conn, cabin_analyses(conn, trip=trip), now=NOW + timedelta(days=RE_ALERT_DAYS + 1)) is not None
+
+
+# --- flexible dates ----------------------------------------------------------------------------------------------
+
+def shifted(out_day, back_day):
+    return option(
+        [leg("RNO", "LAX", "delta", 10_900, out_day), leg("LAX", "SJO", "aeroplan", 25_000, out_day)],
+        [leg("SJO", "LAX", "aeroplan", 25_000, back_day), leg("LAX", "RNO", "delta", 10_900, back_day)],
+    )
+
+
+def test_an_alert_for_shifted_dates_says_which_and_what_was_asked_for(conn):
+    from datetime import date
+    trip = add_trip(conn, flexible=True)
+    analysis = analysis_for(trip, [shifted(date(2027, 1, 7), date(2027, 1, 14))])
+
+    alert = decide_alert(conn, analysis)
+
+    assert alert.message.split("\n")[0] == "RNO > SJO  Jan 07 - Jan 14 (you asked Jan 09 - Jan 16)  (business)"
+
+
+def test_an_alert_on_the_asked_for_dates_does_not_mention_them_twice(conn):
+    trip = add_trip(conn, flexible=True)
+    analysis = analysis_for(trip, [shifted(JAN9, JAN16)])
+
+    assert decide_alert(conn, analysis).message.split("\n")[0] == "RNO > SJO  Jan 09 - Jan 16  (business)"
+
+
+def test_the_same_flights_on_different_days_are_different_alerts():
+    from datetime import date
+    assert option_key(shifted(date(2027, 1, 7), date(2027, 1, 14))) != option_key(shifted(JAN9, JAN16))

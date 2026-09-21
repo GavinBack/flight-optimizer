@@ -326,3 +326,95 @@ def test_unknown_ages_give_no_oldest_age():
     hub = Itinerary(legs=(dated(""), dated("")), via="LAX")
 
     assert hub.oldest_age_days(TODAY) is None
+
+
+# --- flexible windows ------------------------------------------------------------------------------------------
+
+class RangeClient(FakeClient):
+    """Like FakeClient, and remembers the date range of every search."""
+
+    def search(self, origin, destination, start, end, *, sources=None, **_):
+        self.calls.append((origin, destination, start, end))
+        return [r for r in self.table.get((origin, destination), []) if start <= r.date <= end]
+
+
+JAN6, JAN12, JAN13 = date(2027, 1, 6), date(2027, 1, 12), date(2027, 1, 13)
+
+
+def test_an_exact_search_asks_for_one_day(conn):
+    client = RangeClient({})
+
+    search_one_way(client, "RNO", "SJO", JAN9, gateways=["LAX"], cabin=Cabin.BUSINESS)
+
+    assert client.calls == [("RNO", "SJO", JAN9, JAN9), ("RNO", "LAX", JAN9, JAN9)]
+
+
+def test_a_window_searches_three_days_either_side_in_the_same_number_of_calls(conn):
+    exact, wide = RangeClient({}), RangeClient({})
+    table = {
+        ("RNO", "LAX"): [award("RNO", "LAX", JAN9, 10_000)],
+        ("LAX", "SJO"): [award("LAX", "SJO", JAN9, 25_000)],
+    }
+    exact.table = wide.table = table
+
+    search_one_way(exact, "RNO", "SJO", JAN9, gateways=["LAX"], cabin=Cabin.BUSINESS)
+    search_one_way(wide, "RNO", "SJO", JAN9, gateways=["LAX"], cabin=Cabin.BUSINESS, window=3)
+
+    assert len(wide.calls) == len(exact.calls) == 3
+    assert wide.calls[0] == ("RNO", "SJO", JAN6, JAN12)
+    assert wide.calls[1] == ("RNO", "LAX", JAN6, JAN12)
+    assert wide.calls[2] == ("LAX", "SJO", JAN6, JAN13)      # the second leg may go the day after the last first leg
+
+
+def test_a_window_finds_space_on_neighbouring_days_that_exact_dates_miss():
+    table = {
+        ("RNO", "LAX"): [award("RNO", "LAX", date(2027, 1, 7), 10_000)],
+        ("LAX", "SJO"): [award("LAX", "SJO", date(2027, 1, 7), 25_000)],
+        ("RNO", "SJO"): [award("RNO", "SJO", date(2027, 1, 11), 60_000, source="aeroplan")],
+    }
+
+    exact = search_one_way(RangeClient(table), "RNO", "SJO", JAN9, gateways=["LAX"], cabin=Cabin.BUSINESS)
+    wide = search_one_way(RangeClient(table), "RNO", "SJO", JAN9, gateways=["LAX"], cabin=Cabin.BUSINESS, window=3)
+
+    assert exact == []
+    assert sorted((i.legs[0].date, i.total_miles) for i in wide) == [(date(2027, 1, 7), 35_000), (date(2027, 1, 11), 60_000)]
+
+
+def test_a_window_does_not_reach_further_than_asked():
+    table = {("RNO", "SJO"): [award("RNO", "SJO", date(2027, 1, 13), 60_000)]}   # four days out
+
+    assert search_one_way(RangeClient(table), "RNO", "SJO", JAN9, gateways=[], cabin=Cabin.BUSINESS, window=3) == []
+
+
+def test_a_window_stops_at_today():
+    from datetime import timedelta
+
+    soon = date.today() + timedelta(days=1)
+    client = RangeClient({})
+
+    search_one_way(client, "RNO", "SJO", soon, gateways=[], cabin=Cabin.BUSINESS, window=3)
+
+    assert client.calls == [("RNO", "SJO", date.today(), soon + timedelta(days=3))]
+
+
+def test_a_trip_whose_dates_have_passed_searches_nothing():
+    client = RangeClient({})
+
+    assert search_one_way(client, "RNO", "SJO", date(2020, 1, 1), gateways=["LAX"], cabin=Cabin.BUSINESS) == []
+    assert client.calls == []
+
+
+def test_search_trip_widens_only_flexible_trips(conn):
+    exact_trip = conn.execute("SELECT * FROM trips WHERE id = ?", (add_trip(conn),)).fetchone()
+    flexible_trip = conn.execute(
+        "SELECT * FROM trips WHERE id = ?", (add_trip(conn, name="Flex", depart_date=date(2027, 2, 1), return_date=date(2027, 2, 8), flexible=True),)
+    ).fetchone()
+    exact_client, flexible_client = RangeClient({}), RangeClient({})
+
+    search_trip(exact_client, exact_trip, [], cabin=Cabin.BUSINESS)
+    search_trip(flexible_client, flexible_trip, [], cabin=Cabin.BUSINESS)
+
+    assert exact_client.calls == [("RNO", "SJO", JAN9, JAN9), ("SJO", "RNO", JAN16, JAN16)]
+    assert flexible_client.calls == [
+        ("RNO", "SJO", date(2027, 1, 29), date(2027, 2, 4)), ("SJO", "RNO", date(2027, 2, 5), date(2027, 2, 11)),
+    ]

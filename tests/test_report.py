@@ -670,3 +670,70 @@ def test_a_premium_economy_section_is_labelled_as_such(conn):
     assert "(premium economy)" in text.splitlines()[1] and "premium economy costs $" in text
     assert "premium economy out $1,505" in text     # the name must not run into the fares
     assert "economy         out $323" in text       # and the economy row stays aligned under it
+
+
+# --- flexible dates -----------------------------------------------------------------------------------------------
+
+JAN7, JAN14 = date(2027, 1, 7), date(2027, 1, 14)
+
+
+def shifted_option(out_day, back_day, miles=25_000):
+    return option(
+        [leg("RNO", "LAX", "american", miles, out_day, direct=False), leg("LAX", "SJO", "aeroplan", 25_000, out_day)],
+        [leg("SJO", "LAX", "aeroplan", 25_000, back_day, direct=False), leg("LAX", "RNO", "delta", 10_900, back_day)],
+    )
+
+
+def render_flexible(conn, ranked, **kwargs):
+    trip = add_trip(conn, flexible=True)
+    return render_trip(trip, ["LAX"], ranked, BASELINE, BALANCES, today=TODAY, **kwargs)
+
+
+def test_a_flexible_trip_says_so_in_its_header_and_that_cash_is_for_the_exact_dates(conn):
+    text = render_flexible(conn, [shifted_option(JAN7, JAN14)])
+
+    assert "(business) (flexible: +/-3 days)" in text.splitlines()[1]
+    assert "Cash fares are for your exact dates. Flexible dates apply to awards only." in text
+
+
+def test_an_exact_trip_says_nothing_about_flexibility(conn):
+    text = render(conn, [best_option()])
+
+    assert "flexible" not in text.lower() and "exact dates" not in text
+
+
+def test_a_flexible_trips_options_show_their_own_dates(conn):
+    text = render_flexible(conn, [shifted_option(JAN7, JAN14)])
+
+    assert "#1  85,900 miles" in text and "Jan 07 - Jan 14" in text.split("#1")[1].splitlines()[0]
+    assert "RNO>LAX Jan 07" in text
+
+
+def test_variants_on_other_dates_are_listed_not_just_counted(conn):
+    ranked = [shifted_option(JAN9, JAN16), shifted_option(JAN7, JAN14), shifted_option(date(2027, 1, 11), JAN16)]
+
+    text = render_flexible(conn, ranked)
+
+    assert "(+2 other date combinations at the same price: Jan 07 - Jan 14, Jan 11 - Jan 16)" in text
+
+
+def test_a_long_list_of_variant_dates_is_cut_short(conn):
+    days = [date(2027, 1, d) for d in (6, 7, 8, 10, 11, 12, 13)]
+    ranked = [shifted_option(JAN9, JAN16)] + [shifted_option(d, JAN16) for d in days]
+
+    text = render_flexible(conn, ranked)
+
+    assert "+2 more)" in text
+
+
+def test_the_cabin_comparison_warns_that_awards_and_cash_may_be_on_different_dates(conn):
+    from flight_optimizer.cabins import compare_cabins
+    from flight_optimizer.report import render_comparison
+    from builders import analysis_for as build_analysis
+
+    trip = add_trip(conn, flexible=True)
+    text = render_comparison(compare_cabins([build_analysis(trip, [], cabin=Cabin.BUSINESS)], TODAY))
+
+    assert "cash fares are for your exact dates only" in text
+    exact = render_comparison(compare_cabins([build_analysis(add_trip(conn, name="Other", depart_date=JAN10), [], cabin=Cabin.BUSINESS)], TODAY))
+    assert "exact dates only" not in exact

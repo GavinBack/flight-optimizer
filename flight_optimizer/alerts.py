@@ -118,6 +118,13 @@ def _dates(trip: sqlite3.Row) -> str:
     return text
 
 
+def travel_dates(trip: sqlite3.Row, option: TripOption) -> str:
+    """The option's dates, and the dates asked for when a flexible trip's option is on other days."""
+    actual = f"{option.depart_date:%b %d}" + (f" - {option.return_date:%b %d}" if option.return_date else "")
+    requested = _dates(trip)
+    return requested if actual == requested else f"{actual} (you asked {requested})"
+
+
 def _changed_legs(option: TripOption, other: TripOption) -> list[str]:
     """Which legs of `other` differ from `option` (different flights, date or program)."""
     ours, theirs = option_legs(option), option_legs(other)
@@ -145,7 +152,7 @@ def build_alert(analysis: TripAnalysis, option: TripOption, *, fallback: TripOpt
             )
 
     lines = [
-        f"{trip['origin']} > {trip['destination']}  {_dates(trip)}  ({cabin})",
+        f"{trip['origin']} > {trip['destination']}  {travel_dates(trip, option)}  ({cabin})",
         value_line,
         f"{urgency.label}: {urgency.reason}",
     ]
@@ -297,7 +304,7 @@ def build_promo_alert(analysis: TripAnalysis, plan: BuyPlan) -> PromoAlert:
     cabin = cabin_label(analysis.cabin)
     programs = ", ".join(p.program for p in plan.purchases)
     lines = [
-        f"{trip['origin']} > {trip['destination']}  {_dates(trip)}  ({cabin})",
+        f"{trip['origin']} > {trip['destination']}  {travel_dates(trip, plan.option)}  ({cabin})",
         f"A {programs} sale makes a {plan.option.total_miles:,}-mile option affordable.",
     ]
     lines += [f"- {purchase_text(p)}" for p in plan.purchases]

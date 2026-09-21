@@ -1558,3 +1558,107 @@ def test_the_digest_command_points_at_the_latest_saved_advice(env):
     _, _, ntfy = run(["digest"], tmp_path)
 
     assert "Latest advice (" in digests(ntfy)[0]["message"]
+
+
+# --- flexible travel windows -------------------------------------------------------------------------------------------
+
+def shifted_awards():
+    """The same trip, but the space is on Jan 7 and Jan 14: two days before and two before the asked dates."""
+    jan7, jan14 = date(2027, 1, 7), date(2027, 1, 14)
+    table = {
+        ("RNO", "LAX"): [award("RNO", "LAX", "delta", 10_900, jan7, "RL")],
+        ("LAX", "SJO"): [award("LAX", "SJO", "aeroplan", 25_000, jan7, "LS")],
+        ("SJO", "LAX"): [award("SJO", "LAX", "aeroplan", 25_000, jan14, "SL")],
+        ("LAX", "RNO"): [award("LAX", "RNO", "delta", 10_900, jan14, "LR")],
+    }
+    detail_table = {
+        "RL": details(10_900, jan7, 7, 10), "LS": details(25_000, jan7, 14, 20),
+        "SL": details(25_000, jan14, 6, 10), "LR": details(10_900, jan14, 14, 16),
+    }
+    return FakeAwards(table, detail_table)
+
+
+def test_an_exact_trip_finds_nothing_when_the_space_is_on_other_days(env):
+    _, tmp_path = env
+
+    _, _, ntfy = run(["notify"], tmp_path, awards=shifted_awards())
+
+    assert ntfy.sent == []
+
+
+def test_a_flexible_trip_finds_it_and_the_alert_says_which_days(env):
+    conn, tmp_path = env
+    run(["trip", "set", "1", "--flexible"], tmp_path)
+
+    _, _, ntfy = run(["notify"], tmp_path, awards=shifted_awards())
+
+    (sent,) = ntfy.sent
+    assert sent["title"] == "Costa Rica (business): 71,800 miles"
+    assert sent["message"].splitlines()[0] == "RNO > SJO  Jan 07 - Jan 14 (you asked Jan 09 - Jan 16)  (business)"
+    (plan,) = (tmp_path / "plans").glob("*business*.txt")
+    assert "you asked Jan 09 2027 - Jan 16 2027, flexible" in plan.read_text()
+
+
+def test_a_flexible_report_lists_the_shifted_dates(env, capsys):
+    _, tmp_path = env
+    run(["trip", "set", "1", "--flexible"], tmp_path)
+
+    run(["report"], tmp_path, awards=shifted_awards())
+
+    out = capsys.readouterr().out
+    assert "(flexible: +/-3 days)" in out and "Jan 07 - Jan 14" in out
+
+
+def test_trip_add_can_be_flexible_and_says_so(env, capsys):
+    conn, tmp_path = env
+
+    run(["trip", "add", "Kelowna", "RNO", "YLW", "--depart", "2026-12-22", "--return", "2026-12-28", "--flexible"], tmp_path)
+
+    out = capsys.readouterr().out
+    assert "Flexible: awards are searched 3 days either side of each date." in out
+    assert trip_rows(conn)[1]["flexible"] == 1
+
+
+def test_trips_are_exact_by_default(env, capsys):
+    conn, tmp_path = env
+
+    run(["trip", "add", "Kelowna", "RNO", "YLW", "--depart", "2026-12-22"], tmp_path)
+
+    assert "Exact dates." in capsys.readouterr().out and trip_rows(conn)[1]["flexible"] == 0
+
+
+def test_trip_set_switches_between_flexible_and_exact(env):
+    conn, tmp_path = env
+
+    run(["trip", "set", "1", "--flexible"], tmp_path)
+    assert trip_rows(conn)[0]["flexible"] == 1
+    run(["trip", "set", "1", "--exact"], tmp_path)
+    assert trip_rows(conn)[0]["flexible"] == 0
+
+
+def test_flexible_and_exact_cannot_both_be_given(env):
+    _, tmp_path = env
+
+    with pytest.raises(SystemExit) as excinfo:
+        run(["trip", "set", "1", "--flexible", "--exact"], tmp_path)
+
+    assert excinfo.value.code == 2
+
+
+def test_the_trip_list_shows_which_trips_are_flexible(env, capsys):
+    _, tmp_path = env
+    run(["trip", "set", "1", "--flexible"], tmp_path)
+    capsys.readouterr()
+
+    run(["trip", "list"], tmp_path)
+
+    lines = capsys.readouterr().out.splitlines()
+    assert "Flexible" in lines[0] and "+/-3 days" in lines[1]
+
+
+def test_switching_to_exact_alone_counts_as_a_change(env, capsys):
+    _, tmp_path = env
+
+    code, _, _ = run(["trip", "set", "1", "--exact"], tmp_path)
+
+    assert code == 0 and "Updated." in capsys.readouterr().out

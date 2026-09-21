@@ -56,6 +56,9 @@ cheapest way to fly. Those are the owner's accepted settings; do not argue with 
 - The owner prefers one ticket over separate bookings (bags, missed-connection cover), same-day connections \
 of 2.5 hours or more, and current data (3 days or newer is current, over 7 days is stale).
 - Award data is a cached snapshot, not live. Flight times are local. Award figures exclude taxes and fees.
+- A trip marked flexible searches awards up to 3 days either side of each date, so an option may be on shifted \
+dates (each option shows its dates). Cash fares are only for the exact requested dates, so compare a shifted \
+award with the cash fare cautiously and say so. Note which shifted dates you would be committing to.
 
 How to work:
 - Use only figures that appear in the report. Do not do your own arithmetic beyond comparing numbers shown; \
@@ -234,7 +237,8 @@ def fingerprint(
         "trips": [
             [
                 {
-                    "trip": [a.trip["id"], a.trip["origin"], a.trip["destination"], a.trip["depart_date"], a.trip["return_date"]],
+                    "trip": [a.trip["id"], a.trip["origin"], a.trip["destination"], a.trip["depart_date"],
+                             a.trip["return_date"], bool(a.trip["flexible"])],
                     "cabin": a.cabin.name,
                     "cash": None if a.baseline is None else [cash(a.baseline.cabin_total), cash(a.baseline.economy_total)],
                     "affordable": len(a.affordable),

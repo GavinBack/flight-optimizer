@@ -303,3 +303,13 @@ def test_the_day_of_a_saved_answer_comes_from_its_file_name(tmp_path):
     from pathlib import Path
 
     assert advice_date(Path("advice-20260921-0700.txt")) == date(2026, 9, 21)
+
+
+def test_switching_a_trip_to_flexible_asks_again_and_the_prompt_explains_it(conn):
+    exact = situation(conn)
+    before = print_of(exact)
+    db.update_trip(conn, exact[0].trip["id"], flexible=True)
+    flexible = situation(conn)
+
+    assert print_of(flexible) != before
+    assert "flexible" in SYSTEM_PROMPT and "exact requested dates" in SYSTEM_PROMPT

@@ -5,6 +5,7 @@ import sqlite3
 from datetime import date
 
 from flight_optimizer import db
+from flight_optimizer.windows import FLEXIBLE_WINDOW_DAYS
 
 
 def airport(code: str) -> str:
@@ -32,6 +33,7 @@ def add_trip(
     return_date: date | None = None,
     gateways: list[str] | tuple[str, ...] = (),
     active: bool = True,
+    flexible: bool = False,
 ) -> int:
     """Validate everything first, then save the trip and its gateways together."""
     if not name.strip():
@@ -55,7 +57,7 @@ def add_trip(
 
     trip_id = db.add_trip(
         conn, name=name.strip(), origin=origin, destination=destination, depart_date=depart_date,
-        return_date=return_date, active=active,
+        return_date=return_date, active=active, flexible=flexible,
     )
     if hubs:
         db.set_gateways(conn, trip_id, hubs)
@@ -66,7 +68,7 @@ def format_trips(conn: sqlite3.Connection) -> str:
     rows = conn.execute("SELECT * FROM trips ORDER BY id").fetchall()
     if not rows:
         return "No trips yet. Add one with: python -m flight_optimizer trip add"
-    lines = [f"{'ID':<4}{'Active':<8}{'Trip':<20}{'Route':<14}{'Dates':<26}Gateways"]
+    lines = [f"{'ID':<4}{'Active':<8}{'Trip':<20}{'Route':<14}{'Dates':<26}{'Flexible':<10}Gateways"]
     for trip in rows:
         depart = date.fromisoformat(trip["depart_date"])
         dates = f"{depart:%b %d %Y}"
@@ -77,6 +79,7 @@ def format_trips(conn: sqlite3.Connection) -> str:
         gateways = ", ".join(db.get_gateways(conn, trip["id"])) or "none"
         lines.append(
             f"{trip['id']:<4}{'yes' if trip['active'] else 'no':<8}{trip['name'][:19]:<20}"
-            f"{trip['origin'] + ' > ' + trip['destination']:<14}{dates:<26}{gateways}"
+            f"{trip['origin'] + ' > ' + trip['destination']:<14}{dates:<26}"
+            f"{('+/-' + str(FLEXIBLE_WINDOW_DAYS) + ' days') if trip['flexible'] else 'exact':<10}{gateways}"
         )
     return "\n".join(lines)

@@ -55,10 +55,14 @@ def render_plan(
     trip = analysis.trip
     urgency = urgency or assess_urgency(option)
     cabin = cabin_label(analysis.cabin)
-    depart = date.fromisoformat(trip["depart_date"])
-    dates = f"{depart:%b %d %Y}"
+    dates = f"{option.depart_date:%b %d %Y}"
+    if option.return_date is not None:
+        dates += f" - {option.return_date:%b %d %Y}"
+    asked = f"{date.fromisoformat(trip['depart_date']):%b %d %Y}"
     if trip["return_date"]:
-        dates += f" - {date.fromisoformat(trip['return_date']):%b %d %Y}"
+        asked += f" - {date.fromisoformat(trip['return_date']):%b %d %Y}"
+    if asked != dates:  # a flexible trip's option on other days
+        dates += f" (you asked {asked}, flexible)"
 
     out = [
         f"BOOKING PLAN   {trip['name']}   {trip['origin']} > {trip['destination']}   {dates}   ({cabin})",

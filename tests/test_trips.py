@@ -155,3 +155,17 @@ def test_the_listing_shows_every_trip_active_or_not(conn):
 
 def test_an_empty_list_says_how_to_add_one(conn):
     assert "trip add" in format_trips(conn)
+
+
+def test_a_trip_is_exact_unless_saved_flexible(conn):
+    assert row(conn, kelowna(conn))["flexible"] == 0
+    assert row(conn, kelowna(conn, depart_date=date(2027, 2, 1), return_date=date(2027, 2, 5), flexible=True))["flexible"] == 1
+
+
+def test_the_listing_marks_flexible_trips(conn):
+    kelowna(conn, flexible=True)
+    kelowna(conn, name="Exact", depart_date=date(2027, 3, 1), return_date=None)
+
+    lines = format_trips(conn).splitlines()
+
+    assert "Flexible" in lines[0] and "+/-3 days" in lines[1] and "exact" in lines[2]

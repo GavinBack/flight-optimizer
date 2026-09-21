@@ -394,3 +394,44 @@ def test_option_freshness_covers_both_directions():
 
 def test_price_and_the_other_rules_still_apply_within_a_freshness_tier():
     assert ranked_miles([hub(50_000, updated=OLD), hub(40_000, updated=OLD), hub(60_000, updated=FRESH)]) == [60_000, 40_000, 50_000]
+
+
+# --- flexible dates: which outbound and return can be paired ------------------------------------------------
+
+def on(day, *, source="delta", origin="RNO", destination="SJO", miles=10_000):
+    from dataclasses import replace
+    return replace(leg(source, miles, origin, destination), date=day)
+
+
+def test_an_option_knows_the_days_its_first_flights_leave():
+    out = trip(on(date(2027, 1, 7)))
+    back = trip(on(date(2027, 1, 14), origin="SJO", destination="RNO"))
+    (option,) = rank_trip(TripSearchResult(trip_id=1, outbound=[out], return_trip=[back]), balances(delta=100_000))
+
+    assert (option.depart_date, option.return_date) == (date(2027, 1, 7), date(2027, 1, 14))
+
+
+def test_a_one_way_option_has_no_return_date():
+    (option,) = rank_trip(TripSearchResult(trip_id=1, outbound=[trip(on(JAN9))], return_trip=None), balances(delta=100_000))
+
+    assert option.return_date is None
+
+
+def test_a_return_that_leaves_before_the_outbound_arrives_is_not_a_trip():
+    outbounds = [trip(on(date(2027, 1, 9))), trip(on(date(2027, 1, 12)))]
+    returns = [trip(on(date(2027, 1, 10), origin="SJO", destination="RNO")),
+               trip(on(date(2027, 1, 16), origin="SJO", destination="RNO"))]
+
+    ranked = rank_trip(TripSearchResult(trip_id=1, outbound=outbounds, return_trip=returns), balances(delta=200_000))
+
+    pairs = sorted((o.depart_date.day, o.return_date.day) for o in ranked)
+    assert pairs == [(9, 10), (9, 16), (12, 16)]      # (12, 10) would come home before leaving
+
+
+def test_a_return_on_the_arrival_day_is_allowed():
+    two_leg = trip(on(date(2027, 1, 9), destination="LAX"), on(date(2027, 1, 10), origin="LAX"), via="LAX")
+    back = trip(on(date(2027, 1, 10), origin="SJO", destination="RNO"))
+
+    ranked = rank_trip(TripSearchResult(trip_id=1, outbound=[two_leg], return_trip=[back]), balances(delta=200_000))
+
+    assert len(ranked) == 1

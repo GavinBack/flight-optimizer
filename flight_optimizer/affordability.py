@@ -113,6 +113,16 @@ class TripOption:
         return sum(i.total_miles for i in self.itineraries)
 
     @property
+    def depart_date(self) -> date:
+        """The day the outbound's first flight leaves."""
+        return self.itineraries[0].legs[0].date
+
+    @property
+    def return_date(self) -> date | None:
+        """The day the return's first flight leaves, for a round trip."""
+        return self.itineraries[1].legs[0].date if len(self.itineraries) > 1 else None
+
+    @property
     def self_transfers(self) -> int:
         """Total connections across all directions that would be separate bookings."""
         return sum(i.self_transfers for i in self.itineraries)
@@ -218,6 +228,8 @@ def rank_trip(
     options = [
         TripOption(itineraries=combo, affordability=assess(combo, balances))
         for combo in product(*directions)
+        # With flexible dates an outbound can land after a return leaves; that is not a trip.
+        if len(combo) == 1 or combo[1].legs[0].date >= combo[0].legs[-1].date
     ]
     today = today or date.today()
     return sorted(options, key=lambda option: _sort_key(option, today))

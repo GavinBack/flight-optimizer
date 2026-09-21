@@ -38,6 +38,8 @@ CREATE TABLE IF NOT EXISTS trips (
     -- Unused: every trip is priced in economy, premium economy and business (itineraries.EVALUATED_CABINS).
     cabin       TEXT NOT NULL DEFAULT 'business'
                 CHECK (cabin IN ('economy', 'premium_economy', 'business', 'first')),
+    -- 0 searches the exact dates; 1 also searches FLEXIBLE_WINDOW_DAYS either side of each date.
+    flexible    INTEGER NOT NULL DEFAULT 0 CHECK (flexible IN (0, 1)),
     -- NULL means no limit.
     max_miles      INTEGER CHECK (max_miles IS NULL OR max_miles > 0),
     max_cash_price REAL CHECK (max_cash_price IS NULL OR max_cash_price > 0),
@@ -140,6 +142,12 @@ def init_schema(conn: sqlite3.Connection) -> None:
     """Create tables if missing. Safe to call on every start."""
     with conn:
         conn.executescript(SCHEMA)
+        # Columns added after the first release: CREATE TABLE IF NOT EXISTS leaves an old table as it was.
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(trips)")}
+        if "flexible" not in columns:
+            conn.execute(
+                "ALTER TABLE trips ADD COLUMN flexible INTEGER NOT NULL DEFAULT 0 CHECK (flexible IN (0, 1))"
+            )
 
 
 def add_trip(
@@ -154,15 +162,17 @@ def add_trip(
     cabin: str = "business",
     max_miles: int | None = None,
     max_cash_price: float | None = None,
+    flexible: bool = False,
 ) -> int:
-    """Save a trip. `max_miles` / `max_cash_price` of None mean no limit."""
+    """Save a trip. `max_miles` / `max_cash_price` of None mean no limit; `flexible` widens the
+    award search by a few days either side of each date."""
     if cabin not in CABINS:
         raise ValueError(f"Unknown cabin {cabin!r}; expected one of {CABINS}")
     with conn:
         cur = conn.execute(
             "INSERT INTO trips (name, origin, destination, depart_date, return_date,"
-            " active, cabin, max_miles, max_cash_price)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " active, cabin, max_miles, max_cash_price, flexible)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 name,
                 origin.upper(),
@@ -173,6 +183,7 @@ def add_trip(
                 cabin,
                 max_miles,
                 max_cash_price,
+                int(flexible),
             ),
         )
     return cur.lastrowid
@@ -218,6 +229,7 @@ def update_trip(
     return_date: date | None = None,
     one_way: bool = False,
     active: bool | None = None,
+    flexible: bool | None = None,
 ) -> None:
     """Change a trip. Only the fields given are touched; `one_way` clears the return date."""
     trip = conn.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
@@ -236,12 +248,13 @@ def update_trip(
 
     with conn:
         conn.execute(
-            "UPDATE trips SET name = ?, depart_date = ?, return_date = ?, active = ? WHERE id = ?",
+            "UPDATE trips SET name = ?, depart_date = ?, return_date = ?, active = ?, flexible = ? WHERE id = ?",
             (
                 name if name is not None else trip["name"],
                 new_depart.isoformat(),
                 new_return.isoformat() if new_return else None,
                 int(active) if active is not None else trip["active"],
+                int(flexible) if flexible is not None else trip["flexible"],
                 trip_id,
             ),
         )

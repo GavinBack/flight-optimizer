@@ -18,6 +18,7 @@ from flight_optimizer.programs import PROGRAM_NAMES, STALE_AFTER_DAYS
 from flight_optimizer.promos import Promo
 from flight_optimizer.report import miss_text
 from flight_optimizer.savings import estimate_value
+from flight_optimizer.windows import window_note
 
 DIGEST_INTERVAL = timedelta(days=7)
 _META_KEY = "digest:last_sent"
@@ -139,7 +140,7 @@ def trip_section(
 ) -> list[str]:
     """One trip's summary. `analyses` are that trip's per-cabin analyses."""
     trip = analyses[0].trip
-    lines = [f"{trip['name']}: {trip['origin']} > {trip['destination']}  {_dates(trip)}"]
+    lines = [f"{trip['name']}: {trip['origin']} > {trip['destination']}  {_dates(trip)}{window_note(trip)}"]
     for analysis in analyses:
         lines += _cabin_lines(analysis, promos, today)
     lines += _upgrade_lines(analyses, today)

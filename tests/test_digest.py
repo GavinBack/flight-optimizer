@@ -313,3 +313,11 @@ def test_the_digest_points_at_the_latest_advice_when_there_is_one(conn):
 
 def test_without_advice_the_digest_has_no_such_line(conn):
     assert "Latest advice" not in digest_for(conn, [affordable()]).message
+
+
+def test_a_flexible_trip_says_so_in_the_digest_header(conn):
+    trip = add_trip(conn, flexible=True)
+
+    lines = trip_section([analysis_for(trip, [affordable()])], {}, {}, TODAY)
+
+    assert lines[0] == "Costa Rica: RNO > SJO  Jan 09 - Jan 16 (flexible: +/-3 days)"

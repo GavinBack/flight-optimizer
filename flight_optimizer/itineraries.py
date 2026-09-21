@@ -13,6 +13,7 @@ from enum import IntEnum
 from flight_optimizer import connections, db
 from flight_optimizer.connections import ConnectionClass
 from flight_optimizer.seats_aero import AwardResult, Cabin, SeatsAeroClient
+from flight_optimizer.windows import date_window, window_days
 
 
 # Legs reporting fewer seats than this are treated as unbookable. Set to 0 to keep them.
@@ -168,8 +169,13 @@ def search_one_way(
     max_layover_days: int = 1,
     sources: list[str] | None = None,
     min_seats: int = MIN_SEATS,
+    window: int = 0,
 ) -> list[Itinerary]:
     """Cheapest-first itineraries leaving `origin` on `on_date`, direct or via a gateway.
+
+    With `window` days, any departure from that many days before to that many days after `on_date`
+    counts (never a date in the past). A search covers a date range, so this costs about the same
+    number of API calls as an exact date.
 
     Legs reporting fewer than `min_seats` seats are dropped as unbookable. Some programs
     (Azul, Aeromexico, mostly American) report 0 seats on most results, which may mean
@@ -183,19 +189,24 @@ def search_one_way(
         results = client.search(frm, to, start, end, sources=sources)
         return [r for r in results if r.cabin is cabin and r.remaining_seats >= min_seats]
 
+    span = date_window(on_date, window)
+    if span is None:
+        return []
+    first_day, last_day = span
+
     itineraries = [
         Itinerary(legs=(r,), via=None)
-        for r in leg(origin, destination, on_date, on_date)
+        for r in leg(origin, destination, first_day, last_day)
     ]
 
-    latest = on_date + timedelta(days=max_layover_days)
+    latest = last_day + timedelta(days=max_layover_days)
     for gateway in gateways:
         if gateway in (origin, destination):
             continue
-        first_legs = leg(origin, gateway, on_date, on_date)
+        first_legs = leg(origin, gateway, first_day, last_day)
         if not first_legs:
             continue
-        second_legs = leg(gateway, destination, on_date, latest)
+        second_legs = leg(gateway, destination, first_day, latest)
         itineraries += combine_via_gateway(first_legs, second_legs, gateway, max_layover_days)
 
     return sorted(itineraries, key=lambda i: i.total_miles)
@@ -236,7 +247,7 @@ def search_trip(
 ) -> TripSearchResult:
     options = dict(
         gateways=gateways, cabin=cabin, max_layover_days=max_layover_days,
-        sources=sources, min_seats=min_seats,
+        sources=sources, min_seats=min_seats, window=window_days(trip),
     )
 
     outbound = search_one_way(

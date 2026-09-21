@@ -265,3 +265,25 @@ def test_the_plan_header_states_data_freshness_relative_to_when_it_was_generated
 
     assert "Data freshness: data current, oldest 1d." in current.split("\n\n")[0]
     assert "Data freshness: DATA STALE, oldest 50d." in stale.split("\n\n")[0]
+
+
+def test_a_plan_for_shifted_dates_shows_the_dates_to_book_and_what_was_asked(conn):
+    from datetime import date
+    from builders import leg, option
+
+    trip = add_trip(conn, flexible=True)
+    shifted = option(
+        [leg("RNO", "LAX", "delta", 10_900, date(2027, 1, 7)), leg("LAX", "SJO", "aeroplan", 25_000, date(2027, 1, 7))],
+        [leg("SJO", "LAX", "aeroplan", 25_000, date(2027, 1, 14)), leg("LAX", "RNO", "delta", 10_900, date(2027, 1, 14))],
+    )
+    analysis = analysis_for(trip, [shifted])
+
+    text = render_plan(analysis, shifted, balances=BALANCES, generated_at=GENERATED)
+
+    assert "Jan 07 2027 - Jan 14 2027 (you asked Jan 09 2027 - Jan 16 2027, flexible)" in text.splitlines()[0]
+
+
+def test_a_plan_on_the_asked_dates_is_headed_as_before(conn):
+    _, text = plan_for(conn)
+
+    assert "Jan 09 2027 - Jan 16 2027   (business)" in text.splitlines()[0] and "you asked" not in text

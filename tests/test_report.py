@@ -74,7 +74,7 @@ def render(conn, ranked, baseline=BASELINE, **kwargs):
 def test_header_and_baseline_section(conn):
     text = render(conn, [best_option()])
 
-    assert "Costa Rica   RNO > SJO   Jan 09 2027 - Jan 16 2027   (business)" in text
+    assert "Costa Rica   RNO > SJO   arrive Jan 09 2027, leave Jan 16 2027   (business)" in text
     assert "Via gateways: DEN, LAX" in text
     assert "layovers over 1h and up to 4h, total <= 15h" in text
     assert "TOTAL $2,267" in text and "TOTAL $699" in text
@@ -97,7 +97,8 @@ def test_same_shape_date_variants_are_collapsed(conn):
     text = render(conn, ranked)
 
     assert sum(1 for line in text.splitlines() if line.startswith("#")) == 1
-    assert "(+1 other date combination at the same price)" in text
+    # the variant's outbound lands a day later, so its dates are listed
+    assert "(+1 other date combination at the same price: Jan 10 (leave Jan 09) - Jan 16)" in text
 
 
 def test_warnings_flag_connections_same_day_zero_seats_and_stale_data(conn):
@@ -692,7 +693,7 @@ def render_flexible(conn, ranked, **kwargs):
 def test_a_flexible_trip_says_so_in_its_header_and_that_cash_is_for_the_exact_dates(conn):
     text = render_flexible(conn, [shifted_option(JAN7, JAN14)])
 
-    assert "(business) (flexible: +/-3 days)" in text.splitlines()[1]
+    assert "(business) (flexible: arrive up to 3 days early, return +/-3)" in text.splitlines()[1]
     assert "Cash fares are for your exact dates. Flexible dates apply to awards only." in text
 
 

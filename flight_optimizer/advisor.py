@@ -29,6 +29,7 @@ from flight_optimizer.taxes import option_taxes
 from flight_optimizer.joint import build_joint
 from flight_optimizer.promos import Promo
 from flight_optimizer.report import render_joint, render_trip_sections
+from flight_optimizer.windows import EARLY_DEPARTURE_DAYS, FLEXIBLE_WINDOW_DAYS
 
 API_URL = "https://api.anthropic.com/v1/messages"
 API_VERSION = "2023-06-01"
@@ -61,7 +62,11 @@ of 2.5 hours or more, and current data (3 days or newer is current, over 7 days 
 any target price the owner set. Use them to judge whether a cash fare is good; with little history, say so.
 - Award data is a cached snapshot, not live. Flight times are local. Award taxes and fees are included in the dollar figures and cents per mile, converted at fixed approximate \
 exchange rates (a + after a tax amount means some could not be converted): treat them as approximate.
-- A trip marked flexible searches awards up to 3 days either side of each date, so an option may be on shifted \
+- A trip's first date is the day the owner wants to ARRIVE, and its return date the day they want to leave. \
+An outbound award may leave up to {EARLY_DEPARTURE_DAYS} day earlier and land on the day (options show "(leave ...)" when \
+they do); cash fares are for flights leaving on the arrival day.
+- A trip marked flexible searches awards landing up to {FLEXIBLE_WINDOW_DAYS} days BEFORE the arrival date (never after: it is a \
+deadline) and returning up to {FLEXIBLE_WINDOW_DAYS} days either side of the return date, so an option may be on shifted \
 dates (each option shows its dates). Cash fares are only for the exact requested dates, so compare a shifted \
 award with the cash fare cautiously and say so. Note which shifted dates you would be committing to.
 

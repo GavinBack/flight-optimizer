@@ -672,3 +672,15 @@ def test_the_value_line_shows_taxes_only_when_there_are_some(conn):
     free = decide_alert(conn, analysis_for(trip, [without_taxes(good_option())]))
 
     assert free.message.split("\n")[1] == "71,800 miles (3.2 c/mile vs $2,267 business cash)"
+
+
+def test_an_alert_leaving_the_day_before_the_asked_arrival_shows_both_days(conn):
+    trip = add_trip(conn)  # exact dates: arrive Jan 09, leave Jan 16
+    early = option(
+        [leg("RNO", "LAX", "delta", 10_900, date(2027, 1, 8)), leg("LAX", "SJO", "aeroplan", 25_000, JAN9)],
+        [leg("SJO", "LAX", "aeroplan", 25_000, JAN16), leg("LAX", "RNO", "delta", 10_900, JAN16)],
+    )
+
+    alert = decide_alert(conn, analysis_for(trip, [early]))
+
+    assert alert.message.split("\n")[0] == "RNO > SJO  Jan 09 (leave Jan 08) - Jan 16  (business)"

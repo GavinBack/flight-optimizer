@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -437,3 +437,18 @@ def test_the_columns_line_up_whatever_the_longest_label(conn):
     header = section(text).splitlines()[1]
     column = header.index("c/mile") + len("c/mile")  # right edge of the cents column
     assert all(line[column - 4:column].replace(".", "").strip().isdigit() for line in lines)
+
+
+def test_an_exact_trip_leaving_the_day_before_is_not_labelled_flexible(conn):
+    early = option(
+        [leg("RNO", "LAX", "delta", 5_000, JAN9 - timedelta(days=1),
+             departs=datetime(2027, 1, 8, 18, 0), arrives=datetime(2027, 1, 8, 20, 0)),
+         leg("LAX", "SJO", "aeroplan", 25_000, JAN9, departs=datetime(2027, 1, 9, 0, 30), arrives=datetime(2027, 1, 9, 7, 0))],
+        [leg("SJO", "LAX", "aeroplan", 25_000, JAN16), leg("LAX", "RNO", "delta", 5_000, JAN16)],
+    )
+
+    _, text = plan_for(conn, [early])
+
+    head = text.splitlines()[0]
+    assert "Jan 09 2027 (leave Jan 08 2027) - Jan 16 2027" in head
+    assert "you asked" not in head and "flexible" not in head

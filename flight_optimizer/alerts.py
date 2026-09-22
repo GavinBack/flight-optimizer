@@ -19,6 +19,7 @@ from flight_optimizer.itineraries import Freshness, is_stale
 from flight_optimizer.promos import Promo
 from flight_optimizer.savings import estimate_value
 from flight_optimizer.taxes import option_taxes
+from flight_optimizer.windows import on_asked_dates, option_dates
 
 RE_ALERT_DAYS = 7  # don't repeat the same option within this window unless it got cheaper
 URGENT_SEATS = 2  # at most this many seats on any leg: act today
@@ -122,9 +123,8 @@ def _dates(trip: sqlite3.Row) -> str:
 
 def travel_dates(trip: sqlite3.Row, option: TripOption) -> str:
     """The option's dates, and the dates asked for when a flexible trip's option is on other days."""
-    actual = f"{option.depart_date:%b %d}" + (f" - {option.return_date:%b %d}" if option.return_date else "")
-    requested = _dates(trip)
-    return requested if actual == requested else f"{actual} (you asked {requested})"
+    actual = option_dates(option)
+    return actual if on_asked_dates(trip, option) else f"{actual} (you asked {_dates(trip)})"
 
 
 def _changed_legs(option: TripOption, other: TripOption) -> list[str]:

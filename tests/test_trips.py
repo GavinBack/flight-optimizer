@@ -168,4 +168,4 @@ def test_the_listing_marks_flexible_trips(conn):
 
     lines = format_trips(conn).splitlines()
 
-    assert "Flexible" in lines[0] and "+/-3 days" in lines[1] and "exact" in lines[2]
+    assert "Flexible" in lines[0] and "-3 / ±3" in lines[1] and "exact" in lines[2]

@@ -52,7 +52,7 @@ def test_a_window_that_has_wholly_passed_is_nothing():
 
 def test_the_note_is_empty_for_exact_trips_and_states_the_window_for_flexible_ones(conn):
     assert window_note(trip(conn)) == ""
-    assert window_note(trip(conn, name="Flex", depart_date=date(2027, 3, 1), flexible=True)) == " (flexible: +/-3 days)"
+    assert window_note(trip(conn, name="Flex", depart_date=date(2027, 3, 1), flexible=True)) == " (flexible: arrive up to 3 days early, return +/-3)"
 
 
 # --- the database column -----------------------------------------------------------------------------------
@@ -102,3 +102,20 @@ def test_update_can_switch_a_trip_between_exact_and_flexible_and_leaves_it_alone
     assert conn.execute("SELECT flexible FROM trips").fetchone()[0] == 1
     db.update_trip(conn, row["id"], flexible=False)
     assert conn.execute("SELECT flexible FROM trips").fetchone()[0] == 0
+
+
+def test_a_flexible_arrival_date_is_a_deadline():
+    from flight_optimizer.windows import outbound_windows
+
+    leaving, landing = outbound_windows(date(2026, 12, 22), 3, today=date(2026, 9, 22))
+
+    assert landing == (date(2026, 12, 19), date(2026, 12, 22))  # up to 3 days early, never late
+    assert leaving == (date(2026, 12, 18), date(2026, 12, 22))  # a day before the earliest landing
+
+
+def test_an_exact_arrival_may_still_leave_the_day_before():
+    from flight_optimizer.windows import outbound_windows
+
+    assert outbound_windows(date(2027, 1, 9), 0, today=date(2026, 9, 22)) == (
+        (date(2027, 1, 8), date(2027, 1, 9)), (date(2027, 1, 9), date(2027, 1, 9)),
+    )

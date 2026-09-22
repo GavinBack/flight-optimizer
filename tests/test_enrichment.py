@@ -258,3 +258,58 @@ def test_the_chosen_flights_stop_count_is_recorded_on_the_leg():
 
     assert enriched.legs[0].stops == 0 and enriched.legs[1].stops == 2
     assert enriched.hub_leg_stops == 2 and enriched.legs[1].direct is False
+
+
+# --- the outbound must land on the days asked -------------------------------------------------
+
+JAN8 = date(2027, 1, 8)
+
+
+def one_leg(availability_id="D"):
+    return Itinerary(legs=(award("RNO", "SJO", availability_id),), via=None)
+
+
+def test_a_flight_leaving_the_day_before_and_landing_on_the_day_is_kept():
+    red_eye = flight(datetime(2027, 1, 8, 23, 0), arrives=datetime(2027, 1, 9, 6, 0), miles=30_000, numbers="RED1")
+    daytime = flight(datetime(2027, 1, 8, 9, 0), arrives=datetime(2027, 1, 8, 15, 0), miles=20_000, numbers="DAY1")
+    client = FakeClient({"D": details(daytime, red_eye)})
+
+    result, stats = run(client, one_leg(), lands=(JAN9, JAN9))
+
+    # the cheaper flight lands a day early, so the red-eye is chosen instead of dropping the row
+    assert result.legs[0].flight_numbers == "RED1" and result.legs[0].miles == 30_000
+    assert stats.wrong_landing_day == 0
+
+
+def test_an_outbound_landing_a_day_early_or_late_is_dropped_and_counted():
+    early = flight(datetime(2027, 1, 8, 9, 0), arrives=datetime(2027, 1, 8, 15, 0))
+    late = flight(datetime(2027, 1, 9, 22, 0), arrives=datetime(2027, 1, 10, 5, 0))
+    client = FakeClient({"E": details(early), "L": details(late)})
+
+    for availability_id in ("E", "L"):
+        result, stats = run(client, one_leg(availability_id), lands=(JAN9, JAN9))
+        assert result is None and stats.wrong_landing_day == 1
+
+
+def test_the_landing_day_is_checked_on_the_second_leg_of_a_hub_itinerary():
+    client = FakeClient({
+        "A": details(arriving_at_hub()),
+        "B": details(flight(LAND + timedelta(hours=4), arrives=datetime(2027, 1, 10, 1, 0))),  # lands after midnight
+    })
+
+    result, stats = run(client, two_leg(), lands=(JAN9, JAN9))
+
+    assert result is None and stats.wrong_landing_day == 1
+
+
+def test_enrich_result_applies_the_landing_days_to_the_outbound_only():
+    late = flight(datetime(2027, 1, 9, 22, 0), arrives=datetime(2027, 1, 10, 5, 0))
+    client = FakeClient({"O": details(late), "R": details(late)})
+    result = TripSearchResult(
+        trip_id=1, outbound=[one_leg("O")], return_trip=[one_leg("R")], outbound_lands=(JAN9, JAN9),
+    )
+
+    verified, stats = enrich_result(client, result, cabin=Cabin.BUSINESS, balances={"aeroplan": 100_000})
+
+    assert verified.outbound == [] and len(verified.return_trip) == 1
+    assert verified.outbound_lands == (JAN9, JAN9) and stats.wrong_landing_day == 1

@@ -328,7 +328,7 @@ def test_a_flexible_trip_says_so_in_the_digest_header(conn):
 
     lines = trip_section([analysis_for(trip, [affordable()])], {}, {}, TODAY)
 
-    assert lines[0] == "Costa Rica: RNO > SJO  Jan 09 - Jan 16 (flexible: +/-3 days)"
+    assert lines[0] == "Costa Rica: RNO > SJO  Jan 09 - Jan 16 (flexible: arrive up to 3 days early, return +/-3)"
 
 
 # --- trips that compete for the same miles ----------------------------------------------------------------------------

@@ -54,7 +54,7 @@ from flight_optimizer.promos import (
 from flight_optimizer.buying import RETAIL_PRICES
 from flight_optimizer.programs import PROGRAM_NAMES, format_balances, parse_miles, resolve_program
 from flight_optimizer.trips import add_trip, format_trips, parse_date
-from flight_optimizer.windows import FLEXIBLE_WINDOW_DAYS
+from flight_optimizer.windows import EARLY_DEPARTURE_DAYS, FLEXIBLE_WINDOW_DAYS
 from flight_optimizer.report import build_report
 from flight_optimizer.seats_aero import SeatsAeroClient, SeatsAeroError
 from flight_optimizer.seats_cache import CachedSeatsAero
@@ -149,21 +149,23 @@ def _build_parser() -> argparse.ArgumentParser:
     add_trip_parser.add_argument("name")
     add_trip_parser.add_argument("origin", help="airport code, e.g. RNO")
     add_trip_parser.add_argument("destination", help="airport code, e.g. YLW")
-    add_trip_parser.add_argument("--depart", required=True, metavar="YYYY-MM-DD")
-    add_trip_parser.add_argument("--return", dest="return_date", metavar="YYYY-MM-DD", help="omit for a one-way trip")
+    add_trip_parser.add_argument("--depart", required=True, metavar="YYYY-MM-DD",
+                                 help=f"the day you want to ARRIVE (the flight may leave up to {EARLY_DEPARTURE_DAYS} day earlier)")
+    add_trip_parser.add_argument("--return", dest="return_date", metavar="YYYY-MM-DD",
+                                 help="the day you want to leave to come home; omit for a one-way trip")
     add_trip_parser.add_argument("--gateways", nargs="+", default=[], metavar="AIRPORT",
                                  help="hub airports to route through when origin and destination have no direct award route")
     add_trip_parser.add_argument("--flexible", action="store_true",
-                                 help=f"also search {FLEXIBLE_WINDOW_DAYS} days either side of each date (awards only; default: exact dates)")
+                                 help=f"awards may land up to {FLEXIBLE_WINDOW_DAYS} days before the arrival date and return {FLEXIBLE_WINDOW_DAYS} days either side (default: exact dates)")
     add_trip_parser.add_argument("--inactive", action="store_true", help="save it without searching or alerting on it yet")
     set_trip = trip_actions.add_parser("set", help="change a trip's name, dates, flexibility, or whether it is active")
     set_trip.add_argument("trip_id", type=int)
     set_trip.add_argument("--name")
-    set_trip.add_argument("--depart", metavar="YYYY-MM-DD")
-    set_trip.add_argument("--return", dest="return_date", metavar="YYYY-MM-DD")
+    set_trip.add_argument("--depart", metavar="YYYY-MM-DD", help="the day you want to arrive")
+    set_trip.add_argument("--return", dest="return_date", metavar="YYYY-MM-DD", help="the day you want to leave to come home")
     set_trip.add_argument("--one-way", action="store_true", help="drop the return leg")
     window = set_trip.add_mutually_exclusive_group()
-    window.add_argument("--flexible", action="store_true", help=f"search {FLEXIBLE_WINDOW_DAYS} days either side of each date")
+    window.add_argument("--flexible", action="store_true", help=f"land up to {FLEXIBLE_WINDOW_DAYS} days early, return {FLEXIBLE_WINDOW_DAYS} days either side")
     window.add_argument("--exact", action="store_true", help="search the exact dates only")
     state = set_trip.add_mutually_exclusive_group()
     state.add_argument("--active", action="store_true", help="search and alert on this trip")
@@ -573,7 +575,7 @@ def _run_trip(conn, args) -> int:
         print(f"Added trip {trip_id}: {trip['name']}, {trip['origin']} > {trip['destination']}, "
               f"{depart:%b %d %Y}" + (f" - {return_date:%b %d %Y}" if return_date else " (one way)")
               + ", priced in economy, premium economy and business."
-              + (f" Flexible: awards are searched {FLEXIBLE_WINDOW_DAYS} days either side of each date."
+              + (f" Flexible: awards may land up to {FLEXIBLE_WINDOW_DAYS} days before the arrival date (never after it), and return {FLEXIBLE_WINDOW_DAYS} days either side of the return date."
                  if trip["flexible"] else " Exact dates."))
         print(f"Gateways: {', '.join(gateways) if gateways else 'none'}")
         if not gateways:

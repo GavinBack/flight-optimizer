@@ -118,6 +118,12 @@ class TripOption:
         return self.itineraries[0].legs[0].date
 
     @property
+    def arrive_date(self) -> date:
+        """The day the outbound lands (local), or its last flight's day if times are not known."""
+        last = self.itineraries[0].legs[-1]
+        return last.arrives_at.date() if last.arrives_at is not None else last.date
+
+    @property
     def return_date(self) -> date | None:
         """The day the return's first flight leaves, for a round trip."""
         return self.itineraries[1].legs[0].date if len(self.itineraries) > 1 else None

@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -225,8 +225,8 @@ def test_search_active_trips_skips_inactive_trips(conn):
     assert list(results) == [active_id]
     assert set(results[active_id]) == {Cabin.ECONOMY, Cabin.PREMIUM_ECONOMY, Cabin.BUSINESS}
     assert inactive_id not in results
-    # The inactive trip's searches never happened.
-    assert client.calls and all(call[2] in (JAN9, JAN16) for call in client.calls)
+    # The inactive trip's searches never happened (the outbound may leave the day before it lands).
+    assert client.calls and all(call[2] in (JAN9 - timedelta(days=1), JAN9, JAN16) for call in client.calls)
 
 
 # --- one search, every cabin ------------------------------------------------------------
@@ -414,7 +414,38 @@ def test_search_trip_widens_only_flexible_trips(conn):
     search_trip(exact_client, exact_trip, [], cabin=Cabin.BUSINESS)
     search_trip(flexible_client, flexible_trip, [], cabin=Cabin.BUSINESS)
 
-    assert exact_client.calls == [("RNO", "SJO", JAN9, JAN9), ("SJO", "RNO", JAN16, JAN16)]
+    # The outbound date is the day to land, so the search starts a day earlier; the return is unchanged.
+    assert exact_client.calls == [("RNO", "SJO", date(2027, 1, 8), JAN9), ("SJO", "RNO", JAN16, JAN16)]
     assert flexible_client.calls == [
-        ("RNO", "SJO", date(2027, 1, 29), date(2027, 2, 4)), ("SJO", "RNO", date(2027, 2, 5), date(2027, 2, 11)),
+        ("RNO", "SJO", date(2027, 1, 28), date(2027, 2, 1)), ("SJO", "RNO", date(2027, 2, 5), date(2027, 2, 11)),
     ]
+
+
+# --- the outbound date is the day to land -----------------------------------------------------
+
+JAN8 = date(2027, 1, 8)
+
+
+def test_an_outbound_may_leave_the_day_before_it_lands_but_never_after(conn):
+    client = RangeClient({
+        ("RNO", "LAX"): [award("RNO", "LAX", JAN8, 5_000), award("RNO", "LAX", JAN9, 6_000)],
+        ("LAX", "SJO"): [award("LAX", "SJO", JAN8, 20_000), award("LAX", "SJO", JAN9, 21_000),
+                         award("LAX", "SJO", JAN10, 1_000)],  # leaves after the landing day
+    })
+
+    found = search_one_way(client, "RNO", "SJO", JAN9, gateways=["LAX"], cabin=Cabin.BUSINESS, lands_on_date=True)
+
+    pairs = {(i.legs[0].date, i.legs[1].date) for i in found}
+    assert pairs == {(JAN8, JAN8), (JAN8, JAN9), (JAN9, JAN9)}
+    assert ("LAX", "SJO", JAN8, JAN9) in client.calls  # no search past the landing day
+
+
+def test_search_trip_records_the_landing_days_and_leaves_the_return_alone(conn):
+    trip = conn.execute("SELECT * FROM trips WHERE id = ?", (add_trip(conn),)).fetchone()
+    client = RangeClient({})
+
+    result = search_trip(client, trip, ["LAX"], cabin=Cabin.BUSINESS)
+
+    assert result.outbound_lands == (JAN9, JAN9)
+    # the return still leaves on its date, with a connection allowed the next day
+    assert ("SJO", "RNO", JAN16, JAN16) in client.calls and ("SJO", "LAX", JAN16, JAN16) in client.calls

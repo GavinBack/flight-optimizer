@@ -13,7 +13,7 @@ from enum import IntEnum
 from flight_optimizer import connections, db
 from flight_optimizer.connections import ConnectionClass
 from flight_optimizer.seats_aero import AwardResult, Cabin, SeatsAeroClient
-from flight_optimizer.windows import date_window, window_days
+from flight_optimizer.windows import date_window, outbound_windows, window_days
 
 
 # Legs reporting fewer seats than this are treated as unbookable. Set to 0 to keep them.
@@ -141,6 +141,8 @@ class TripSearchResult:
     trip_id: int
     outbound: list[Itinerary]
     return_trip: list[Itinerary] | None  # None for a one-way trip
+    # The days the outbound may land (checked once flight times are known); None: any day
+    outbound_lands: tuple[date, date] | None = None
 
 
 def combine_via_gateway(
@@ -170,12 +172,17 @@ def search_one_way(
     sources: list[str] | None = None,
     min_seats: int = MIN_SEATS,
     window: int = 0,
+    lands_on_date: bool = False,
 ) -> list[Itinerary]:
     """Cheapest-first itineraries leaving `origin` on `on_date`, direct or via a gateway.
 
     With `window` days, any departure from that many days before to that many days after `on_date`
     counts (never a date in the past). A search covers a date range, so this costs about the same
     number of API calls as an exact date.
+
+    With `lands_on_date`, `on_date` is the day to land instead (an outbound): legs may leave from
+    `EARLY_DEPARTURE_DAYS` before the landing window, and none leaves after it. Search rows carry no
+    times, so the landing day itself is checked once flight times are looked up (`enrichment.py`).
 
     Legs reporting fewer than `min_seats` seats are dropped as unbookable. Some programs
     (Azul, Aeromexico, mostly American) report 0 seats on most results, which may mean
@@ -189,17 +196,24 @@ def search_one_way(
         results = client.search(frm, to, start, end, sources=sources)
         return [r for r in results if r.cabin is cabin and r.remaining_seats >= min_seats]
 
-    span = date_window(on_date, window)
-    if span is None:
-        return []
-    first_day, last_day = span
+    if lands_on_date:
+        windows = outbound_windows(on_date, window)
+        if windows is None:
+            return []
+        (first_day, last_day), _ = windows
+        latest = last_day  # a flight cannot leave after the last day it may land
+    else:
+        span = date_window(on_date, window)
+        if span is None:
+            return []
+        first_day, last_day = span
+        latest = last_day + timedelta(days=max_layover_days)
 
     itineraries = [
         Itinerary(legs=(r,), via=None)
         for r in leg(origin, destination, first_day, last_day)
     ]
 
-    latest = last_day + timedelta(days=max_layover_days)
     for gateway in gateways:
         if gateway in (origin, destination):
             continue
@@ -250,17 +264,19 @@ def search_trip(
         sources=sources, min_seats=min_seats, window=window_days(trip),
     )
 
-    outbound = search_one_way(
-        client, trip["origin"], trip["destination"],
-        date.fromisoformat(trip["depart_date"]), **options,
-    )
+    arrive_on = date.fromisoformat(trip["depart_date"])  # the day to land (see `windows.py`)
+    outbound = search_one_way(client, trip["origin"], trip["destination"], arrive_on, lands_on_date=True, **options)
+    windows = outbound_windows(arrive_on, window_days(trip))
     return_trip = None
     if trip["return_date"]:
         return_trip = search_one_way(
             client, trip["destination"], trip["origin"],
             date.fromisoformat(trip["return_date"]), **options,
         )
-    return TripSearchResult(trip_id=trip["id"], outbound=outbound, return_trip=return_trip)
+    return TripSearchResult(
+        trip_id=trip["id"], outbound=outbound, return_trip=return_trip,
+        outbound_lands=windows[1] if windows else None,
+    )
 
 
 def search_trip_cabins(

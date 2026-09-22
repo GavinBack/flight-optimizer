@@ -6,7 +6,7 @@ Plans are saved under `plans/` (git-ignored: they contain balances and trip deta
 import math
 import re
 import sqlite3
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 
 from flight_optimizer.affordability import (
@@ -21,6 +21,7 @@ from flight_optimizer.promos import Promo
 from flight_optimizer.report import freshness_label
 from flight_optimizer.savings import estimate_value
 from flight_optimizer.taxes import option_taxes, rates_note
+from flight_optimizer.windows import asked_dates, on_asked_dates, option_dates
 from flight_optimizer.seats_aero import TAX_UNIT_CONFIRMED, Cabin
 
 DEFAULT_DIRECTORY = Path("plans")
@@ -143,14 +144,9 @@ def render_plan(
     trip = analysis.trip
     urgency = urgency or assess_urgency(option)
     cabin = cabin_label(analysis.cabin)
-    dates = f"{option.depart_date:%b %d %Y}"
-    if option.return_date is not None:
-        dates += f" - {option.return_date:%b %d %Y}"
-    asked = f"{date.fromisoformat(trip['depart_date']):%b %d %Y}"
-    if trip["return_date"]:
-        asked += f" - {date.fromisoformat(trip['return_date']):%b %d %Y}"
-    if asked != dates:  # a flexible trip's option on other days
-        dates += f" (you asked {asked}, flexible)"
+    dates = option_dates(option, "%b %d %Y")
+    if not on_asked_dates(trip, option):  # a flexible trip's option on other days
+        dates += f" (you asked {asked_dates(trip, '%b %d %Y')}, flexible)"
 
     out = [
         f"BOOKING PLAN   {trip['name']}   {trip['origin']} > {trip['destination']}   {dates}   ({cabin})",

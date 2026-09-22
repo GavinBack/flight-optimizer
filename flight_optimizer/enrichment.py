@@ -11,6 +11,7 @@ Only the leading candidates in each direction are looked up, to protect the
 """
 
 from dataclasses import dataclass, replace
+from datetime import date
 
 from flight_optimizer.affordability import assess
 from flight_optimizer.connections import best_pairing
@@ -36,6 +37,7 @@ class EnrichmentStats:
     cache_hits: int = 0  # flight details reused from the local cache
     dropped_unsafe: int = 0  # every flight pairing had a connection of 1 hour or less
     unverifiable: int = 0  # no flight details, or no bookable flights in the cabin
+    wrong_landing_day: int = 0  # an outbound whose flights all land outside the days asked for
     budget_reached: bool = False  # stopped early to protect the API quota
 
 
@@ -95,8 +97,14 @@ def enrich_itinerary(
     cache: dict[str, TripDetails | None],
     stats: EnrichmentStats,
     min_seats: int = MIN_SEATS,
+    lands: tuple[date, date] | None = None,
 ) -> Itinerary | None:
-    """The itinerary with real flights chosen, or None if it can't be recommended."""
+    """The itinerary with real flights chosen, or None if it can't be recommended.
+
+    With `lands`, only flights on the last leg that land (local time) within those days count,
+    and the filter comes before choosing: a row can hold a daytime flight landing a day early
+    and a red-eye landing on the day.
+    """
     details: list[TripDetails] = []
     for leg in itinerary.legs:
         found = _details(client, leg, cache, stats) if leg.availability_id else None
@@ -109,6 +117,11 @@ def enrich_itinerary(
     if any(not options for options in usable):
         stats.unverifiable += 1
         return None
+    if lands is not None:
+        usable[-1] = [o for o in usable[-1] if lands[0] <= o.arrives_at.date() <= lands[1]]
+        if not usable[-1]:
+            stats.wrong_landing_day += 1
+            return None
 
     if len(itinerary.legs) == 1:
         option = min(usable[0], key=lambda o: (o.miles, o.stops))
@@ -150,7 +163,7 @@ def enrich_result(
     stats = EnrichmentStats()
     cache: dict[str, TripDetails | None] = {}
 
-    def verified(itineraries: list[Itinerary]) -> list[Itinerary]:
+    def verified(itineraries: list[Itinerary], lands: tuple[date, date] | None = None) -> list[Itinerary]:
         ordered = sorted(itineraries, key=lambda it: _candidate_key(it, balances))
         limit = stats.lookups + max_lookups_per_direction
         kept: list[Itinerary] = []
@@ -161,12 +174,12 @@ def enrich_result(
                 stats.budget_reached = True
                 break
             enriched = enrich_itinerary(
-                client, itinerary, cabin=cabin, cache=cache, stats=stats, min_seats=min_seats
+                client, itinerary, cabin=cabin, cache=cache, stats=stats, min_seats=min_seats, lands=lands
             )
             if enriched is not None:
                 kept.append(enriched)
         return kept
 
-    outbound = verified(result.outbound)
+    outbound = verified(result.outbound, result.outbound_lands)
     return_trip = verified(result.return_trip) if result.return_trip is not None else None
-    return TripSearchResult(trip_id=result.trip_id, outbound=outbound, return_trip=return_trip), stats
+    return replace(result, outbound=outbound, return_trip=return_trip), stats

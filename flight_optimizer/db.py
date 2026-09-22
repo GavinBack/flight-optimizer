@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS trips (
     return_date TEXT,
     -- Gates the daily check and every alert for this trip. Off by default.
     active      INTEGER NOT NULL DEFAULT 0 CHECK (active IN (0, 1)),
-    -- 0 searches the exact dates; 1 also searches FLEXIBLE_WINDOW_DAYS either side of each date.
+    -- 0 searches the exact dates; 1 lands up to FLEXIBLE_WINDOW_DAYS early and returns that many days either side.
     flexible    INTEGER NOT NULL DEFAULT 0 CHECK (flexible IN (0, 1)),
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
@@ -202,7 +202,7 @@ def add_trip(
     active: bool = False,
     flexible: bool = False,
 ) -> int:
-    """Save a trip. `flexible` widens the award search by a few days either side of each date."""
+    """Save a trip. `flexible` widens the award search (see `windows.py`)."""
     with conn:
         cur = conn.execute(
             "INSERT INTO trips (name, origin, destination, depart_date, return_date,"

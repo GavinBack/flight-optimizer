@@ -68,7 +68,7 @@ def format_trips(conn: sqlite3.Connection) -> str:
     rows = conn.execute("SELECT * FROM trips ORDER BY id").fetchall()
     if not rows:
         return "No trips yet. Add one with: python -m flight_optimizer trip add"
-    lines = [f"{'ID':<4}{'Active':<8}{'Trip':<20}{'Route':<14}{'Dates':<26}{'Flexible':<10}Gateways"]
+    lines = [f"{'ID':<4}{'Active':<8}{'Trip':<20}{'Route':<14}{'Arrive - Leave':<26}{'Flexible':<10}Gateways"]
     for trip in rows:
         depart = date.fromisoformat(trip["depart_date"])
         dates = f"{depart:%b %d %Y}"
@@ -80,6 +80,6 @@ def format_trips(conn: sqlite3.Connection) -> str:
         lines.append(
             f"{trip['id']:<4}{'yes' if trip['active'] else 'no':<8}{trip['name'][:19]:<20}"
             f"{trip['origin'] + ' > ' + trip['destination']:<14}{dates:<26}"
-            f"{('+/-' + str(FLEXIBLE_WINDOW_DAYS) + ' days') if trip['flexible'] else 'exact':<10}{gateways}"
+            f"{(f'-{FLEXIBLE_WINDOW_DAYS} / ±{FLEXIBLE_WINDOW_DAYS}') if trip['flexible'] else 'exact':<10}{gateways}"
         )
     return "\n".join(lines)

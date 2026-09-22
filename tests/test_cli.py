@@ -1608,7 +1608,7 @@ def test_a_flexible_report_lists_the_shifted_dates(env, capsys):
     run(["report"], tmp_path, awards=shifted_awards())
 
     out = capsys.readouterr().out
-    assert "(flexible: +/-3 days)" in out and "Jan 07 - Jan 14" in out
+    assert "(flexible: arrive up to 3 days early, return +/-3)" in out and "Jan 07 - Jan 14" in out
 
 
 def test_trip_add_can_be_flexible_and_says_so(env, capsys):
@@ -1617,7 +1617,7 @@ def test_trip_add_can_be_flexible_and_says_so(env, capsys):
     run(["trip", "add", "Kelowna", "RNO", "YLW", "--depart", "2026-12-22", "--return", "2026-12-28", "--flexible"], tmp_path)
 
     out = capsys.readouterr().out
-    assert "Flexible: awards are searched 3 days either side of each date." in out
+    assert "Flexible: awards may land up to 3 days before the arrival date (never after it)" in out
     assert trip_rows(conn)[1]["flexible"] == 1
 
 
@@ -1655,7 +1655,7 @@ def test_the_trip_list_shows_which_trips_are_flexible(env, capsys):
     run(["trip", "list"], tmp_path)
 
     lines = capsys.readouterr().out.splitlines()
-    assert "Flexible" in lines[0] and "+/-3 days" in lines[1]
+    assert "Flexible" in lines[0] and "-3 / ±3" in lines[1]
 
 
 def test_switching_to_exact_alone_counts_as_a_change(env, capsys):

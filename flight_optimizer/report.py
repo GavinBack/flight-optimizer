@@ -28,7 +28,7 @@ from flight_optimizer.promos import Promo, active_promos, best_promos
 from flight_optimizer.savings import TripBaseline, estimate_value
 from flight_optimizer.taxes import option_taxes, rates_note
 from flight_optimizer.seats_aero import AwardResult, Cabin, SeatsAeroClient
-from flight_optimizer.windows import window_note
+from flight_optimizer.windows import EARLY_DEPARTURE_DAYS, option_dates, window_note
 
 RULE = "=" * 78
 
@@ -136,11 +136,8 @@ def _group_by_shape(options: list[TripOption]) -> list[tuple[TripOption, list[Tr
 
 
 def _option_dates(option: TripOption) -> str:
-    """The travel dates of an option, e.g. "Jan 07 - Jan 14" (the days its first flights leave)."""
-    text = f"{option.depart_date:%b %d}"
-    if option.return_date is not None:
-        text += f" - {option.return_date:%b %d}"
-    return text
+    """The travel dates of an option, e.g. "Jan 07 - Jan 14" (the day it lands, and the day the return leaves)."""
+    return option_dates(option)
 
 
 def _variants_text(option: TripOption, variants: list[TripOption]) -> str:
@@ -242,7 +239,8 @@ def miss_text(option: TripOption) -> str:
 
 
 def _stats_line(stats: EnrichmentStats | None) -> str | None:
-    if stats is None or not (stats.lookups or stats.cache_hits or stats.dropped_unsafe or stats.unverifiable):
+    if stats is None or not (stats.lookups or stats.cache_hits or stats.dropped_unsafe or stats.unverifiable
+                             or stats.wrong_landing_day):
         return None
     reused = f", {stats.cache_hits} reused from cache" if stats.cache_hits else ""
     parts = [f"Flight times checked for the leading options ({stats.lookups} lookups{reused})"]
@@ -250,6 +248,8 @@ def _stats_line(stats: EnrichmentStats | None) -> str | None:
         parts.append(f"{stats.dropped_unsafe} dropped for a connection of {MIN_CONNECTION_MINUTES // 60} hour or less")
     if stats.unverifiable:
         parts.append(f"{stats.unverifiable} skipped for lack of usable flight details")
+    if stats.wrong_landing_day:
+        parts.append(f"{stats.wrong_landing_day} outbound dropped for landing on a day you did not ask for")
     if stats.budget_reached:
         parts.append("stopped early to protect the API quota")
     return "; ".join(parts) + "."
@@ -409,10 +409,9 @@ def render_trip(
     today: date | None = None,
 ) -> str:
     today = today or date.today()
-    depart = date.fromisoformat(trip["depart_date"])
-    dates = f"{depart:%b %d %Y}"
+    dates = f"arrive {date.fromisoformat(trip['depart_date']):%b %d %Y}"
     if trip["return_date"]:
-        dates += f" - {date.fromisoformat(trip['return_date']):%b %d %Y}"
+        dates += f", leave {date.fromisoformat(trip['return_date']):%b %d %Y}"
     cabin_name = cabin_label(cabin)
 
     out = [RULE, f"{trip['name']}   {trip['origin']} > {trip['destination']}   {dates}   ({cabin_name}){window_note(trip)}"]
@@ -423,6 +422,10 @@ def render_trip(
     out.append(
         f"CASH BASELINE  (cheapest fare, layovers over {MIN_CONNECTION_MINUTES // 60}h and up to "
         f"{DEFAULT_MAX_LAYOVER_MINUTES // 60}h, total <= {DEFAULT_MAX_TOTAL_MINUTES // 60}h)"
+    )
+    out.append(
+        f"  Cash fares leave on the day you want to arrive; awards may also leave up to {EARLY_DEPARTURE_DAYS} day"
+        f"{'s' if EARLY_DEPARTURE_DAYS != 1 else ''} earlier."
     )
     if trip["flexible"]:
         out.append("  Cash fares are for your exact dates. Flexible dates apply to awards only.")

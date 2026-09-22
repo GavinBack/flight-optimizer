@@ -3,18 +3,21 @@
 Plans are saved under `plans/` (git-ignored: they contain balances and trip details).
 """
 
+import math
 import re
 import sqlite3
 from datetime import date, datetime
 from pathlib import Path
 
 from flight_optimizer.affordability import (
-    SOURCE_TO_PROGRAM, TRANSFER_NOTES, TRANSFER_TIMES, TripOption, points_received, ratio_text, slow_transfers,
+    CAPITAL_ONE_TRANSFERS, SOURCE_TO_PROGRAM, TRANSFER_NOTES, TRANSFER_TIMES, TripOption, points_received, ratio_text, slow_transfers,
 )
 from flight_optimizer.alerts import Urgency, assess_urgency, heads_up, oldest_data, option_key, option_legs
 from flight_optimizer.analysis import TripAnalysis
-from flight_optimizer.cabins import cabin_label
+from flight_optimizer.buying import ESTIMATE_NOTE, MilesPrice, buy_all_cost, price_option_miles
+from flight_optimizer.cabins import MILE_VALUE_CENTS, cabin_label
 from flight_optimizer.programs import PROGRAM_NAMES
+from flight_optimizer.promos import Promo
 from flight_optimizer.report import freshness_label
 from flight_optimizer.savings import estimate_value
 from flight_optimizer.taxes import option_taxes, rates_note
@@ -45,6 +48,88 @@ def _taxes_line(leg) -> str:
     return amount + f"(Seats.aero reports {leg.total_taxes}; assumed hundredths, so confirm on the booking page)"
 
 
+def _price_notes(price: MilesPrice) -> list[str]:
+    q = price.quote
+    if q is None:
+        return []
+    notes = []
+    if q.points_bought > price.miles:
+        notes.append(f"sold in blocks: buys {q.points_bought:,}")
+    if q.kind != "retail":
+        until = f" until {q.promo_ends:%b %d}" if q.promo_ends else ""
+        notes.append(f"{q.percent}% {q.kind} sale{until}")
+        if not q.tiers_known:
+            notes.append("BEST CASE: this sale's tiers are not known")
+        if price.retail_quote is not None:
+            notes.append(f"retail {price.retail_quote.cost_usd / price.miles * 100:.2f} c/mile")
+    if q.confidence == "low":
+        notes.append("low-confidence price")
+    return notes
+
+
+def _buy_all_text(prices: tuple[MilesPrice, ...], option: TripOption, cash: int | None) -> str:
+    """Buying every mile plus the taxes, against the cash fare."""
+    bought, complete = buy_all_cost(prices)
+    taxes = option_taxes(option)
+    total = bought + taxes.usd
+    plus = "" if complete and taxes.complete else "+"
+    text = f"${bought:,.0f}{plus} + {taxes.text} = ${total:,.0f}{plus}"
+    if cash is None:
+        return text
+    if not complete:  # a floor: only a verdict that the floor already settles
+        return text + (f", already ${total - cash:,.0f} MORE than cash ${cash:,}" if total > cash else f" (some miles cannot be bought, so no verdict against cash ${cash:,})")
+    difference = total - cash
+    return text + (f", ${difference:,.0f} MORE than cash ${cash:,}" if difference > 0 else f", ${-difference:,.0f} less than cash ${cash:,}")
+
+
+def _miles_vs_cash(
+    analysis: TripAnalysis, option: TripOption, prices: tuple[MilesPrice, ...]
+) -> list[str]:
+    """Cents per mile side by side: what the miles replace in cash, and what they cost to buy or transfer."""
+    cabin = cabin_label(analysis.cabin)
+    value = estimate_value(option, analysis.baseline) if analysis.baseline is not None else None
+    rows: list[tuple[str, str, str, str, str]] = []  # label, miles, cents per mile, cost, notes
+    if value is not None and value.cents_per_mile_vs_cabin is not None:
+        rows.append((
+            f"cash, {cabin}", f"{option.total_miles:,}", f"{value.cents_per_mile_vs_cabin:.2f}",
+            f"${value.cabin_cash:,}", f"what each mile replaces, after {value.taxes.text}",
+        ))
+        if analysis.cabin is not Cabin.ECONOMY and value.cents_per_mile_vs_economy is not None:
+            rows.append((
+                "cash, economy", f"{option.total_miles:,}", f"{value.cents_per_mile_vs_economy:.2f}",
+                f"${value.economy_cash:,}", "the same, if you would otherwise fly economy",
+            ))
+    for price in prices:
+        if price.quote is None:
+            rows.append((f"buy {price.program}", f"{price.miles:,}", "-", "-", price.reason))
+        else:
+            rows.append((
+                f"buy {price.program}", f"{price.miles:,}", f"{price.cents_per_mile:.2f}",
+                f"${price.quote.cost_usd:,.0f}", "; ".join(_price_notes(price)),
+            ))
+        if price.program in CAPITAL_ONE_TRANSFERS:
+            rate = CAPITAL_ONE_TRANSFERS[price.program]
+            capital_one = math.ceil(price.miles * rate)  # Capital One miles that land `price.miles` points
+            cost = capital_one * MILE_VALUE_CENTS / 100
+            rows.append((
+                "  or Capital One", f"{capital_one:,}", f"{cost / price.miles * 100:.2f}", f"${cost:,.0f}",
+                f"transfer {rate.numerator}:{rate.denominator}, valued at the {MILE_VALUE_CENTS:.2f} c travel-eraser rate",
+            ))
+
+    width = max(len(row[0]) for row in rows) + 2
+    out = ["", f"MILES VS CASH, CENTS PER MILE  ({ESTIMATE_NOTE})"]
+    out.append(f"  {'':<{width}}{'miles':>9}   {'c/mile':>7}   {'cost':>10}   notes")
+    if value is None or value.cents_per_mile_vs_cabin is None:
+        out.append("  (no cash fare for these dates, so there is nothing to measure the miles against)")
+    for label, miles, cents, cost, notes in rows:
+        out.append(f"  {label:<{width}}{miles:>9}   {cents:>7}   {cost:>10}   {notes}".rstrip())
+    cash = value.cabin_cash if value is not None else None
+    out.append(f"  Buying every mile: {_buy_all_text(prices, option, cash)}.")
+    out.append("  Paying fewer cents per mile than the cash line beats cash for those miles. Judge the whole trip")
+    out.append("  by the total: one program can beat the cash line while the trip as a whole does not.")
+    return out
+
+
 def render_plan(
     analysis: TripAnalysis,
     option: TripOption,
@@ -53,6 +138,7 @@ def render_plan(
     generated_at: datetime,
     urgency: Urgency | None = None,
     notes: tuple[str, ...] = (),
+    promos: dict[str, Promo] | None = None,
 ) -> str:
     trip = analysis.trip
     urgency = urgency or assess_urgency(option)
@@ -170,7 +256,14 @@ def render_plan(
     out += ["", "IF THIS OPTION DISAPPEARS"]
     if others:
         for other in others:
-            out.append(f"  {other.total_miles:,} miles ({other.total_miles - option.total_miles:+,})")
+            extra = ""
+            if analysis.baseline is not None:
+                cents = estimate_value(other, analysis.baseline).cents_per_mile_vs_cabin
+                if cents is not None:
+                    extra += f", {cents:.2f} c/mile vs cash"
+            other_prices = price_option_miles(other, promos, generated_at.date())
+            extra += f", buy every mile {_buy_all_text(other_prices, other, None)}"
+            out.append(f"  {other.total_miles:,} miles ({other.total_miles - option.total_miles:+,}){extra}")
             for label, itinerary in zip(("out ", "back"), other.itineraries):
                 out.append("    " + label + "  " + "  +  ".join(_leg_line(l) + f" {l.miles:,} {l.source}" for l in itinerary.legs))
     else:
@@ -187,6 +280,8 @@ def render_plan(
                 if analysis.cabin is not Cabin.ECONOMY and baseline.economy_total is not None else ""
             ),
         ]
+
+    out += _miles_vs_cash(analysis, option, price_option_miles(option, promos, generated_at.date()))
 
     if notes:
         out += ["", "OTHER TRIPS SHARE THESE MILES"] + [f"  {note}" for note in notes]

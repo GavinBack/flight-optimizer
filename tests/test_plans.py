@@ -5,6 +5,8 @@ import pytest
 from builders import JAN9, JAN16, RECENT, add_trip, analysis_for, baseline, good_option, leg, option
 from flight_optimizer import db
 from flight_optimizer.plans import latest_plan, render_plan, save_plan
+from flight_optimizer.promos import Promo, PromoTier
+from flight_optimizer.seats_aero import Cabin
 
 GENERATED = datetime(2026, 9, 20, 14, 5)
 BALANCES = {"capital_one": 115_519, "delta": 30_000}
@@ -18,10 +20,28 @@ def conn():
     connection.close()
 
 
-def plan_for(conn, options=None, **kwargs):
+def plan_for(conn, options=None, promos=None, **kwargs):
     trip = add_trip(conn)
     analysis = analysis_for(trip, options or [good_option(seats=2)], **kwargs)
-    return trip, render_plan(analysis, analysis.affordable[0], balances=BALANCES, generated_at=GENERATED)
+    return trip, render_plan(
+        analysis, analysis.affordable[0], balances=BALANCES, generated_at=GENERATED, promos=promos
+    )
+
+
+def delta_sale(tiers=(PromoTier(2_000, None, 50),)):
+    return {"delta": Promo(key="k", program="delta", kind="bonus", headline_percent=50, tiers=tiers,
+                           ends=datetime(2026, 10, 1).date(), title="Delta sale", url="https://sale.example",
+                           source="test", last_seen=GENERATED.date())}
+
+
+def section(text):
+    return text[text.index("MILES VS CASH"):text.index("NOTES")]
+
+
+def row(text, label):
+    """A table row's cells after the label, with the column padding collapsed."""
+    line = next(line for line in section(text).splitlines() if line.strip().startswith(label))
+    return " ".join(line.strip()[len(label):].split())
 
 
 def test_steps_come_in_the_safe_order_verify_then_transfer_then_book(conn):
@@ -324,3 +344,96 @@ def test_the_confirmed_currencies_say_where_they_were_checked():
     from flight_optimizer.seats_aero import TAX_UNIT_CONFIRMED
 
     assert set(TAX_UNIT_CONFIRMED) == {"CAD"} and "aircanada.com" in TAX_UNIT_CONFIRMED["CAD"]
+
+
+def test_miles_vs_cash_puts_the_cash_value_and_buy_prices_per_mile_side_by_side(conn):
+    _, text = plan_for(conn)
+
+    table = section(text)
+    assert "confirm on the program's site before paying" in table
+    assert row(text, "cash, business") == "71,800 2.73 $2,267 what each mile replaces, after $305 taxes"
+    assert row(text, "cash, economy").startswith("71,800 0.55 $699")
+    assert row(text, "buy aeroplan") == "50,000 2.70 $1,350 low-confidence price"
+    assert row(text, "or Capital One").startswith("50,000 1.00 $500 transfer 1:1")
+    # 21,800 miles needed, sold in 2,000 blocks: priced per mile USED, not per mile bought
+    assert row(text, "buy delta") == "21,800 3.80 $828 sold in blocks: buys 22,000"
+    assert "Capital One" not in table.split("buy delta")[1]  # Delta is not a transfer partner
+
+
+def test_the_verdict_is_on_the_whole_trip_not_one_program(conn):
+    _, text = plan_for(conn)
+
+    # aeroplan at 2.70 c is under the 2.73 c cash line, but buying everything still costs more
+    assert "Buying every mile: $2,178 + $305 taxes = $2,483, $216 MORE than cash $2,267." in section(text)
+
+
+def test_a_live_sale_prices_the_miles_and_shows_retail_beside_it(conn):
+    _, text = plan_for(conn, promos=delta_sale())
+
+    table = section(text)
+    assert row(text, "buy delta") == "21,800 2.76 $602 50% bonus sale until Oct 01; retail 3.80 c/mile"
+    assert "BEST CASE" not in table
+    assert "$1,952 + $305 taxes = $2,257, $10 less than cash $2,267" in table
+
+
+def test_a_sale_with_unknown_tiers_is_labelled_a_best_case(conn):
+    _, text = plan_for(conn, promos=delta_sale(tiers=()))
+
+    assert "BEST CASE: this sale's tiers are not known" in section(text)
+
+
+def test_miles_that_cannot_be_bought_make_the_total_a_floor(conn):
+    qantas = option(
+        [leg("RNO", "LAX", "delta", 5_000, JAN9), leg("LAX", "SJO", "qantas", 20_000, JAN9)],
+        [leg("SJO", "LAX", "qantas", 20_000, JAN16), leg("LAX", "RNO", "delta", 5_000, JAN16)],
+    )
+
+    _, text = plan_for(conn, [qantas])
+
+    table = section(text)
+    assert row(text, "buy qantas") == "40,000 - - cannot be bought"
+    assert row(text, "or Capital One").startswith("40,000 1.00 $400")
+    assert "Buying every mile: $376+ + $305 taxes = $682+ (some miles cannot be bought" in table
+
+
+def test_a_purchase_over_the_yearly_limit_says_so(conn):
+    balances = {"capital_one": 0, "delta": 100_000}
+    big = option(
+        [leg("RNO", "LAX", "delta", 35_000, JAN9), leg("LAX", "SJO", "delta", 1_000, JAN9)],
+        [leg("SJO", "LAX", "delta", 35_000, JAN16), leg("LAX", "RNO", "delta", 1_000, JAN16)],
+        balances=balances,
+    )
+
+    _, text = plan_for(conn, [big])
+
+    assert row(text, "buy delta") == "72,000 - - over the 60,000 yearly purchase limit"
+
+
+def test_without_a_cash_fare_the_buy_prices_are_still_shown(conn):
+    _, text = plan_for(conn, baseline_value=None)
+
+    table = section(text)
+    assert "no cash fare for these dates" in table and "buy delta" in table
+    assert "Buying every mile: $2,178 + $305 taxes = $2,483." in table
+
+
+def test_fallback_options_carry_their_cents_per_mile_and_buy_everything_cost(conn):
+    dearer = good_option(out_miles=15_000, flights=("UA7", "AV641", "AV654", "DL9"))
+
+    _, text = plan_for(conn, [good_option(seats=2), dearer])
+
+    assert "75,900 miles (+4,100), 2.58 c/mile vs cash, buy every mile $2,328 + $305 taxes = $2,634" in text
+
+
+def test_the_columns_line_up_whatever_the_longest_label(conn):
+    trip = add_trip(conn)
+    analysis = analysis_for(trip, [good_option(seats=2)], cabin=Cabin.PREMIUM_ECONOMY)
+
+    text = render_plan(analysis, analysis.affordable[0], balances=BALANCES, generated_at=GENERATED)
+
+    lines = [line for line in section(text).splitlines()[1:] if not line.startswith("  Buying") and "c/mile" not in line
+             and line.strip() and not line.startswith("  Paying") and not line.startswith("  by the total")]
+    assert any(line.strip().startswith("cash, premium economy") for line in lines)
+    header = section(text).splitlines()[1]
+    column = header.index("c/mile") + len("c/mile")  # right edge of the cents column
+    assert all(line[column - 4:column].replace(".", "").strip().isdigit() for line in lines)

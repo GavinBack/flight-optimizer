@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Iterable
 
-from flight_optimizer.affordability import TripOption
+from flight_optimizer.affordability import SOURCE_TO_PROGRAM, TripOption
 from flight_optimizer.promos import Promo
 
 US_EXCISE_TAX = 0.075  # federal excise tax on miles bought from US programs
@@ -232,4 +232,54 @@ def rank_buy_plans(
             int(p.option.freshness(today)), p.total_cost, p.option.self_transfers,
             p.option.connection_penalty, p.option.stop_penalty, p.option.total_miles,
         ),
+    )
+
+
+@dataclass(frozen=True)
+class MilesPrice:
+    """What buying the miles one program contributes to an option would cost."""
+
+    program: str
+    miles: int  # the miles this option uses in the program
+    quote: Quote | None  # the cheaper of retail and any live sale; None when it can't be bought
+    retail_quote: Quote | None
+    reason: str = ""  # why there is no quote
+
+    @property
+    def cents_per_mile(self) -> float | None:
+        """Cost per mile USED: a purchase rounded up to the block size costs more per mile needed."""
+        return None if self.quote is None else self.quote.cost_usd / self.miles * 100
+
+
+def price_option_miles(
+    option: TripOption, promos: dict[str, Promo] | None = None, today: date | None = None
+) -> tuple[MilesPrice, ...]:
+    """Per program, what buying every mile the option uses would cost, most miles first."""
+    promos = promos or {}
+    miles: dict[str, int] = {}
+    for itinerary in option.itineraries:
+        for leg in itinerary.legs:
+            program = SOURCE_TO_PROGRAM.get(leg.source, leg.source)
+            miles[program] = miles.get(program, 0) + leg.miles
+    prices = []
+    for program, needed in sorted(miles.items(), key=lambda item: (-item[1], item[0])):
+        retail = _retail_quote(program, needed)
+        reason = ""
+        if retail is None:
+            price = RETAIL_PRICES.get(program)
+            reason = (
+                "cannot be bought" if price is None
+                else f"over the {price.annual_cap:,} yearly purchase limit"
+            )
+        quote = quote_purchase(program, needed, promos.get(program), today)
+        prices.append(MilesPrice(program, needed, quote, retail, reason))
+    return tuple(prices)
+
+
+def buy_all_cost(prices: Iterable[MilesPrice]) -> tuple[float, bool]:
+    """The cost of buying every mile, and whether every program could be priced (False: a floor)."""
+    prices = list(prices)
+    return (
+        round(sum(p.quote.cost_usd for p in prices if p.quote is not None), 2),
+        all(p.quote is not None for p in prices),
     )

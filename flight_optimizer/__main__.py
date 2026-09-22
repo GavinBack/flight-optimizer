@@ -398,7 +398,8 @@ def _alerts_for(
     else:
         # Save the plan first, so the alert's "full steps" pointer is always valid.
         plan_text = render_plan(
-            analysis, alert.option, balances=balances, generated_at=now, urgency=alert.urgency, notes=alert.notes
+            analysis, alert.option, balances=balances, generated_at=now, urgency=alert.urgency, notes=alert.notes,
+            promos=live_promos,
         )
         path = save_plan(plan_text, trip, generated_at=now, cabin=analysis.cabin, directory=plans_dir)
         if _send(conn, clients, trip, alert, dry_run=False, describe="award alert"):
@@ -503,6 +504,7 @@ def _run_plan(conn, clients: Clients, plans_dir: Path, args, now: datetime) -> i
     cabin = Cabin[args.cabin.upper()] if args.cabin else None
     if args.refresh:
         balances = db.get_balances(conn)
+        live_promos = best_promos(active_promos(conn, now.date()))  # stored sales only: no network
         analyses = analyze_trip_cabins(
             conn, clients.awards, clients.cash, trip, balances,
             cabins=(cabin,) if cabin else EVALUATED_CABINS,
@@ -512,7 +514,9 @@ def _run_plan(conn, clients: Clients, plans_dir: Path, args, now: datetime) -> i
                 print(f"{trip['name']} ({cabin_label(analysis.cabin)}): no affordable option right now, so there is no plan to build.")
                 continue
             best = analysis.affordable[0]
-            text = render_plan(analysis, best, balances=balances, generated_at=now, urgency=assess_urgency(best))
+            text = render_plan(
+                analysis, best, balances=balances, generated_at=now, urgency=assess_urgency(best), promos=live_promos
+            )
             path = save_plan(text, trip, generated_at=now, cabin=analysis.cabin, directory=plans_dir)
             print(f"Plan saved to {path}\n")
             print(text)

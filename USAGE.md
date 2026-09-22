@@ -90,6 +90,15 @@ python -m flight_optimizer plan 1 --refresh
 
 Plans are saved as text files in the `plans/` folder.
 
+Each plan ends with a **miles vs cash** table in cents per mile, so the ways of paying can be compared on one scale:
+
+- **Cash:** what each mile replaces. This is the cash fare minus the award's taxes, divided by the miles. For premium cabins the plan also shows the same figure against economy.
+- **Buy:** what buying each program's miles would cost per mile. It uses a live sale if one is cheaper, shows the retail price beside it, and counts purchases rounded up to the block size.
+- **Capital One:** the same miles moved from Capital One, valued at 1 cent a mile (the travel-eraser rate).
+- **Total:** buying every mile plus the taxes, against the cash fare. Judge by this line. One program can cost less per mile than cash while the trip as a whole does not.
+
+Purchase prices are estimates. A program that cannot be bought, or a purchase over the yearly limit, makes the total a minimum (marked `+`). The backup options also show their cents per mile and what buying every mile would cost.
+
 ### advise
 
 ```

@@ -249,7 +249,7 @@ def _stats_line(stats: EnrichmentStats | None) -> str | None:
     if stats.unverifiable:
         parts.append(f"{stats.unverifiable} skipped for lack of usable flight details")
     if stats.wrong_landing_day:
-        parts.append(f"{stats.wrong_landing_day} outbound dropped for landing on a day you did not ask for")
+        parts.append(f"{stats.wrong_landing_day} outbound dropped for landing on a day you did not ask for, or over a day after leaving")
     if stats.budget_reached:
         parts.append("stopped early to protect the API quota")
     return "; ".join(parts) + "."

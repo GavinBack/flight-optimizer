@@ -11,11 +11,12 @@ Only the leading candidates in each direction are looked up, to protect the
 """
 
 from dataclasses import dataclass, replace
-from datetime import date
+from datetime import date, timedelta
 
 from flight_optimizer.affordability import assess
 from flight_optimizer.connections import best_pairing
 from flight_optimizer.itineraries import MIN_SEATS, Itinerary, TripSearchResult
+from flight_optimizer.windows import EARLY_DEPARTURE_DAYS
 from flight_optimizer.seats_aero import (
     AwardResult,
     Cabin,
@@ -37,7 +38,7 @@ class EnrichmentStats:
     cache_hits: int = 0  # flight details reused from the local cache
     dropped_unsafe: int = 0  # every flight pairing had a connection of 1 hour or less
     unverifiable: int = 0  # no flight details, or no bookable flights in the cabin
-    wrong_landing_day: int = 0  # an outbound whose flights all land outside the days asked for
+    wrong_landing_day: int = 0  # an outbound landing outside the days asked for, or too long after it leaves
     budget_reached: bool = False  # stopped early to protect the API quota
 
 
@@ -101,9 +102,9 @@ def enrich_itinerary(
 ) -> Itinerary | None:
     """The itinerary with real flights chosen, or None if it can't be recommended.
 
-    With `lands`, only flights on the last leg that land (local time) within those days count,
-    and the filter comes before choosing: a row can hold a daytime flight landing a day early
-    and a red-eye landing on the day.
+    With `lands`, only flights on the last leg that land (local time) within those days, and no
+    more than `EARLY_DEPARTURE_DAYS` after the first leg leaves, count. The filter comes before
+    choosing: a row can hold a daytime flight landing a day early and a red-eye landing on the day.
     """
     details: list[TripDetails] = []
     for leg in itinerary.legs:
@@ -118,7 +119,10 @@ def enrich_itinerary(
         stats.unverifiable += 1
         return None
     if lands is not None:
-        usable[-1] = [o for o in usable[-1] if lands[0] <= o.arrives_at.date() <= lands[1]]
+        leaves = itinerary.legs[0].date  # a search row's date is the day its flights leave
+        first = max(lands[0], leaves)
+        last = min(lands[1], leaves + timedelta(days=EARLY_DEPARTURE_DAYS))
+        usable[-1] = [o for o in usable[-1] if first <= o.arrives_at.date() <= last]
         if not usable[-1]:
             stats.wrong_landing_day += 1
             return None

@@ -313,3 +313,27 @@ def test_enrich_result_applies_the_landing_days_to_the_outbound_only():
 
     assert verified.outbound == [] and len(verified.return_trip) == 1
     assert verified.outbound_lands == (JAN9, JAN9) and stats.wrong_landing_day == 1
+
+
+def test_an_outbound_landing_two_days_after_it_leaves_is_dropped_even_inside_the_window():
+    # flexible window: land Dec 19-22. Leaving Dec 18 and landing Dec 20 is inside it, but two days on the way.
+    dec18 = date(2026, 12, 18)
+    first = AwardResult(
+        source="aeroplan", origin="RNO", destination="LAX", date=dec18, cabin=Cabin.BUSINESS, miles=1,
+        total_taxes=0, currency="USD", remaining_seats=2, airlines="XX", direct=True,
+        updated_at="2026-05-01T00:00:00Z", availability_id="A",
+    )
+    second = AwardResult(
+        source="aeroplan", origin="LAX", destination="YLW", date=date(2026, 12, 19), cabin=Cabin.BUSINESS, miles=1,
+        total_taxes=0, currency="USD", remaining_seats=2, airlines="XX", direct=True,
+        updated_at="2026-05-01T00:00:00Z", availability_id="B",
+    )
+    client = FakeClient({
+        "A": details(flight(datetime(2026, 12, 18, 15, 0), arrives=datetime(2026, 12, 18, 17, 0))),
+        "B": details(flight(datetime(2026, 12, 19, 17, 0), arrives=datetime(2026, 12, 20, 0, 15))),
+    })
+
+    result, stats = run(client, Itinerary(legs=(first, second), via="LAX"),
+                        lands=(date(2026, 12, 19), date(2026, 12, 22)))
+
+    assert result is None and stats.wrong_landing_day == 1

@@ -313,21 +313,28 @@ def purchase_text(p: Purchase) -> str:
     return text
 
 
-def _buy_lines(
-    misses: list[TripOption], today: date, limit: int, cash_total: int | None = None,
-    promos: dict[str, Promo] | None = None,
-) -> list[str]:
-    """Near-misses that buying miles would make affordable, with the cost of doing so."""
-    plans = rank_buy_plans(misses, today, promos)
+def shown_buy_plans(
+    misses: list[TripOption], today: date, limit: int, promos: dict[str, Promo] | None = None
+) -> list[BuyPlan]:
+    """The buy plans the report lists: best first, one per shape (same-shape date variants add nothing)."""
     shown: list[BuyPlan] = []
     seen: set = set()
-    for plan in plans:  # same-shape date variants add nothing
+    for plan in rank_buy_plans(misses, today, promos):
         shape = _shape(plan.option)
         if shape not in seen:
             seen.add(shape)
             shown.append(plan)
         if len(shown) == limit:
             break
+    return shown
+
+
+def _buy_lines(
+    misses: list[TripOption], today: date, limit: int, cash_total: int | None = None,
+    promos: dict[str, Promo] | None = None,
+) -> list[str]:
+    """Near-misses that buying miles would make affordable, with the cost of doing so."""
+    shown = shown_buy_plans(misses, today, limit, promos)
     if not shown:
         return []
 

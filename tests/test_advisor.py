@@ -345,3 +345,64 @@ def test_a_change_in_an_options_taxes_asks_again_but_a_few_dollars_do_not(conn):
     assert print_of(first) == print_of(close)
     assert print_of(first) != print_of(far)
     assert "converted at fixed approximate" in SYSTEM_PROMPT and "exclude taxes" not in SYSTEM_PROMPT
+
+
+# --- computed facts: figures the advisor used to work out (and get wrong) itself ---------------------
+
+def _baseline(cabin_prices, economy_prices, layovers=(200,)):
+    from builders import fare
+    from flight_optimizer.savings import TripBaseline
+    return TripBaseline(
+        cabin_fares=tuple(fare(p, layovers=layovers) for p in cabin_prices),
+        economy_fares=tuple(fare(p, layovers=layovers) for p in economy_prices),
+    )
+
+
+def _facts(analyses):
+    from flight_optimizer.advisor import computed_facts
+    return computed_facts(analyses, today=TODAY)
+
+
+def test_a_cabin_over_the_upgrade_line_is_stated_with_its_multiple(conn):
+    trip = add_trip(conn)
+    economy = analysis_for(trip, [], cabin=Cabin.ECONOMY, baseline_value=_baseline((529, 534), (529, 534)))
+    business = analysis_for(trip, [], cabin=Cabin.BUSINESS, baseline_value=_baseline((867, 837), (529, 534)))
+
+    facts = _facts([economy, business])
+
+    assert "economy: $1,063 cash, the cheapest way to fly this trip" in facts
+    assert "business: $1,704 cash = 1.60x the cheapest way $1,063 (economy cash), OVER the 1.5x upgrade line" in facts
+
+
+def test_every_cash_layover_is_listed_and_the_short_ones_named(conn):
+    trip = add_trip(conn)
+    economy = analysis_for(trip, [], cabin=Cabin.ECONOMY,
+                           baseline_value=_baseline((323, 376), (323, 376), layovers=(122, 74)))
+
+    facts = _facts([economy])
+
+    assert "economy cash out: layovers 2h02m, 1h14m; UNDER 2.5 hours: 2h02m, 1h14m" in facts
+
+
+def test_a_buy_miles_gap_is_costed_all_in_against_cash(conn):
+    from builders import JAN9, JAN16, leg, option
+    trip = add_trip(conn)
+    gap = option(  # 9,800 united miles short: nothing can transfer to United
+        [leg("RNO", "LAX", "united", 9_800, JAN9), leg("LAX", "SJO", "aeroplan", 72_450, JAN9)],
+        [leg("SJO", "LAX", "aeroplan", 12_500, JAN16), leg("LAX", "RNO", "aeroplan", 15_000, JAN16)],
+    )
+    economy = analysis_for(trip, [gap], cabin=Cabin.ECONOMY, baseline_value=_baseline((323, 376), (323, 376)))
+
+    facts = _facts([economy])
+
+    # 99,950 own miles at 1 c + $376.25 to buy 10,000 United miles + $305 taxes, against $699 cash
+    assert ("economy buy-miles gap 109,750 miles: 99,950 of your miles at 1 c ($1,000) + $376.25 to buy 9,800"
+            " + $305 taxes = $1,681 all in, $982 MORE than cash $699") in facts
+
+
+def test_the_brief_carries_the_facts_and_the_prompt_says_to_use_them(conn):
+    trip = add_trip(conn)
+    brief = build_brief([[analysis_for(trip, [good_option()])]], {"capital_one": 100_000}, today=TODAY)
+
+    assert "COMPUTED FACTS  Costa Rica" in brief
+    assert "COMPUTED FACTS" in SYSTEM_PROMPT and 'only beats cash if its line says "less than cash"' in SYSTEM_PROMPT

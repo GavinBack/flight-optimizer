@@ -37,6 +37,9 @@ API_VERSION = "2023-06-01"
 DEFAULT_MODEL = "claude-sonnet-5"
 # The model thinks before it answers, and thinking counts against this limit as well as the ~450-word answer.
 MAX_OUTPUT_TOKENS = 8000
+# (connect, read) seconds. The whole answer arrives at once and Sonnet 5 thinks first by default, which
+# regularly took over 2 minutes (the old 120s limit failed most daily runs). 10 minutes matches the SDK default.
+REQUEST_TIMEOUT = (10.0, 600.0)
 TOP_OPTIONS = 3  # per cabin: keeps each call small
 
 
@@ -112,7 +115,7 @@ class AnthropicClient:
         model: str = DEFAULT_MODEL,
         session: requests.Session | None = None,
         url: str = API_URL,
-        timeout: float = 120,
+        timeout: tuple[float, float] = REQUEST_TIMEOUT,
     ):
         if not api_key:
             raise ValueError("api_key is required")

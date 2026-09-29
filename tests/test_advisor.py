@@ -406,3 +406,12 @@ def test_the_brief_carries_the_facts_and_the_prompt_says_to_use_them(conn):
 
     assert "COMPUTED FACTS  Costa Rica" in brief
     assert "COMPUTED FACTS" in SYSTEM_PROMPT and 'only beats cash if its line says "less than cash"' in SYSTEM_PROMPT
+
+
+def test_the_request_waits_long_enough_for_a_thinking_model():
+    session = FakeSession()
+
+    AnthropicClient(KEY, session=session).advise("brief")
+
+    connect, read = session.posts[0]["timeout"]
+    assert connect <= 30 and read >= 600  # thinking before answering took over 2 minutes

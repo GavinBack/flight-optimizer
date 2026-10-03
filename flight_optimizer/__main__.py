@@ -6,7 +6,7 @@
     python -m flight_optimizer advise [TRIP] [--dry-run] [--last]   ask Claude to weigh the options (paid API), or show the last answer
     python -m flight_optimizer done TRIP            mark a trip booked (stops alerts)
     python -m flight_optimizer test-notification    check that ntfy reaches your phone
-    python -m flight_optimizer trip [list|add|set]   see, add or change trips
+    python -m flight_optimizer trip [list|add|set|goal]   see, add or change trips and their goals
     python -m flight_optimizer balance [PROGRAM MILES ...]   show balances, or set them
     python -m flight_optimizer gateways [TRIP] [--set|--add|--remove AIRPORT ...]   show or change hubs
     python -m flight_optimizer digest [--dry-run]   send (or preview) the weekly digest now
@@ -31,10 +31,11 @@ from flight_optimizer.advisor import (
 )
 from flight_optimizer.alerts import (
     assess_urgency, decide_alert, decide_promo_alert, decide_upgrade_alert, record_promo_sent, record_sent,
-    record_upgrade_sent, usable_for_alert,
+    record_upgrade_sent, usable_for_alert, worth_the_miles,
 )
 from flight_optimizer.analysis import analyze_trip_cabins
 from flight_optimizer.cabins import MILE_VALUE_CENTS, cabin_label
+from flight_optimizer.goals import load_goals, update_goals
 from flight_optimizer.cash_alerts import decide_cash_alert, record_cash_alert_sent
 from flight_optimizer.cash_fares import SerpApiClient
 from flight_optimizer.config import ConfigError, Settings, load_settings
@@ -190,13 +191,23 @@ def _build_parser() -> argparse.ArgumentParser:
     state.add_argument("--active", action="store_true", help="search and alert on this trip")
     state.add_argument("--inactive", action="store_true", help="stop searching and alerting on this trip")
 
-    target = trip_actions.add_parser(
-        "target", help="show, set or clear the round-trip cash price you would book at (alerts when a fare reaches it)"
+    goal = trip_actions.add_parser(
+        "goal", help="show or change what you want from a trip: the cheapest way to fly, a better seat, or both",
+        description="Goals decide which alerts a trip sends; every cabin is still searched and reported. A max is "
+                    "the most you would pay for that cabin, round trip (an award counts as miles at 1 cent plus "
+                    "taxes): alerts for the cabin fire only at or under it, and reaching it is an alert. Amounts "
+                    "accept 'none' to clear.",
     )
-    target.add_argument("trip_id", type=int)
-    target.add_argument("cabin", nargs="?", choices=["economy", "premium_economy", "business"])
-    target.add_argument("amount", nargs="?", type=float, help="dollars, round trip")
-    target.add_argument("--clear", action="store_true", help="remove the target for that cabin")
+    goal.add_argument("trip_id", type=int, nargs="?")
+    goal.add_argument("--cheapest", action=argparse.BooleanOptionalAction,
+                      help="find the cheapest way to fly (economy)")
+    goal.add_argument("--upgrade", action=argparse.BooleanOptionalAction,
+                      help="watch for a better seat (premium economy and business)")
+    goal.add_argument("--cheapest-max", metavar="DOLLARS", help="the most you would pay for economy")
+    goal.add_argument("--premium-economy-max", metavar="DOLLARS", help="the most you would pay for premium economy")
+    goal.add_argument("--business-max", metavar="DOLLARS", help="the most you would pay for business")
+    goal.add_argument("--upgrade-multiple", metavar="X",
+                      help="flag a better cabin costing at most X times economy (default 1.5; 'none' turns it off)")
 
     balance = commands.add_parser(
         "balance", help="show your balances, or set them: balance PROGRAM MILES [PROGRAM MILES ...]"
@@ -402,15 +413,23 @@ def _alerts_for(
     alert = decide_alert(conn, analysis, now=now, notes_for=notes_for)
     if alert is None:
         current = [o for o in analysis.affordable if o.freshness(now.date()) is not Freshness.STALE]
-        if analysis.affordable and not current:
+        worth = [o for o in current if worth_the_miles(analysis, o)]
+        if not analysis.goals.covers(analysis.cabin):
+            print(f"{label}: not one of this trip's goals, so no alerts (change with: trip goal {trip['id']}).")
+        elif analysis.affordable and not current:
             print(
                 f"{label}: affordable options exist, but every one relies on award data older "
                 f"than {STALE_AWARD_DAYS} days, so no alert was sent. Run the report to see them."
             )
-        elif current and not usable_for_alert(analysis, now.date()):
+        elif current and not worth:
             print(
                 f"{label}: affordable options exist, but their miles are worth less than the cash fare "
                 f"(under {MILE_VALUE_CENTS:g} cent a mile), so no alert was sent. Run the report to see them."
+            )
+        elif worth and not usable_for_alert(analysis, now.date()):
+            print(
+                f"{label}: affordable options exist, but none is at or under your ${analysis.cabin_max:,} max "
+                f"(miles at {MILE_VALUE_CENTS:g} cent plus taxes), so no alert was sent. Run the report to see them."
             )
         else:
             print(f"{label}: nothing new to alert on.")
@@ -555,24 +574,78 @@ def _run_plan(conn, clients: Clients, plans_dir: Path, args, now: datetime) -> i
     return 0
 
 
-def _run_trip_target(conn, args) -> int:
+def _amount(text: str, flag: str) -> int | None:
+    """Whole dollars, or None for 'none'."""
+    if text.strip().lower() == "none":
+        return None
+    try:
+        value = float(text.replace(",", "").lstrip("$"))
+    except ValueError:
+        raise ValueError(f"{flag} takes an amount in dollars, or 'none': not {text!r}") from None
+    if value <= 0:
+        raise ValueError(f"{flag} must be more than $0.")
+    return round(value)
+
+
+def _multiple(text: str) -> float | None:
+    if text.strip().lower() == "none":
+        return None
+    try:
+        return float(text.rstrip("xX"))
+    except ValueError:
+        raise ValueError(f"--upgrade-multiple takes a number such as 1.5, or 'none': not {text!r}") from None
+
+
+def _goals_text(goals) -> list[str]:
+    def money(value):
+        return f"${value:,}" if value is not None else "no max"
+    lines = [f"  cheapest:  {'on' if goals.cheapest else 'off'}" + (f", economy {money(goals.cheapest_max)}" if goals.cheapest else "")]
+    if goals.upgrade:
+        multiple = f"{goals.upgrade_multiple:g}x economy" if goals.upgrade_multiple is not None else "off"
+        lines.append(f"  upgrade:   on, premium economy {money(goals.premium_economy_max)}, business "
+                     f"{money(goals.business_max)}, flag at {multiple}")
+    else:
+        lines.append("  upgrade:   off")
+    return lines
+
+
+def _run_trip_goal(conn, args) -> int:
     trip = _pick_trip(conn, args.trip_id)
-    if args.cabin is None:
-        targets = db.get_cash_targets(conn, trip["id"])
-        if not targets:
-            print(f"{trip['name']}: no cash targets. Set one with: python -m flight_optimizer trip target {trip['id']} economy 700")
-        for cabin, price in targets.items():
-            print(f"{trip['name']}: {cabin.replace('_', ' ')} at or under ${price:,} round trip")
-        return 0
-    if args.clear:
-        removed = db.clear_cash_target(conn, trip["id"], args.cabin)
-        print(f"{trip['name']}: {args.cabin.replace('_', ' ')} target " + ("cleared." if removed else "was not set."))
-        return 0
-    if args.amount is None:
-        raise ValueError("Give an amount in dollars, or --clear.")
-    db.set_cash_target(conn, trip["id"], args.cabin, round(args.amount))
-    print(f"{trip['name']}: you will be alerted when the {args.cabin.replace('_', ' ')} cash fare is at or under "
-          f"${round(args.amount):,} round trip (the fare for your exact dates).")
+    changes: dict = {}
+    notes = []
+    if args.cheapest is not None:
+        changes["cheapest"] = args.cheapest
+    if args.upgrade is not None:
+        changes["upgrade"] = args.upgrade
+    if args.cheapest_max is not None:
+        changes["cheapest_max"] = _amount(args.cheapest_max, "--cheapest-max")
+    for name, flag in (("premium_economy_max", "--premium-economy-max"), ("business_max", "--business-max")):
+        text = getattr(args, name)
+        if text is not None:
+            changes[name] = _amount(text, flag)
+    if args.upgrade_multiple is not None:
+        changes["upgrade_multiple"] = _multiple(args.upgrade_multiple)
+
+    # Setting a goal's max or multiple says you want that goal: turn it on, unless you just turned it off.
+    for goal, fields in (("cheapest", ("cheapest_max",)),
+                         ("upgrade", ("premium_economy_max", "business_max", "upgrade_multiple"))):
+        if any(changes.get(f) is not None for f in fields):
+            if changes.get(goal) is False:
+                raise ValueError(f"You turned the {goal} goal off and set its limits in the same command.")
+            if goal not in changes and not getattr(load_goals(conn, trip["id"]), goal):
+                changes[goal] = True
+                notes.append(f"The {goal} goal was off; setting its limits turned it on.")
+
+    if changes:
+        goals = update_goals(conn, trip["id"], **changes)
+        print(f"{trip['name']}: goals updated.")
+    else:
+        goals = load_goals(conn, trip["id"])
+        print(f"{trip['name']}: goals")
+    for line in _goals_text(goals) + [f"  {note}" for note in notes]:
+        print(line)
+    print("Alerts for a cabin fire only at or under its max, and reaching the max is an alert. "
+          "Every cabin is still searched and shown in the report.")
     return 0
 
 
@@ -629,8 +702,8 @@ def _run_trip(conn, args) -> int:
               else f"Saved inactive. Start searching it with: python -m flight_optimizer trip set {trip_id} --active")
         return 0
 
-    if action == "target":
-        return _run_trip_target(conn, args)
+    if action == "goal":
+        return _run_trip_goal(conn, args)
 
     trip = _pick_trip(conn, args.trip_id)
     active = True if args.active else False if args.inactive else None

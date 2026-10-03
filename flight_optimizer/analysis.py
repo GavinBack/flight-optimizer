@@ -14,6 +14,7 @@ from flight_optimizer.cashtrend import CashTrend, load_trend
 from flight_optimizer.affordability import TripOption, rank_trip
 from flight_optimizer.cash_fares import SerpApiClient, SerpApiError
 from flight_optimizer.enrichment import EnrichmentStats, enrich_result
+from flight_optimizer.goals import TripGoals, load_goals
 from flight_optimizer.itineraries import EVALUATED_CABINS, TripSearchResult, search_trip_cabins
 from flight_optimizer.savings import TripBaseline, trip_baseline
 from flight_optimizer.seats_aero import Cabin, SeatsAeroClient
@@ -29,11 +30,16 @@ class TripAnalysis:
     stats: EnrichmentStats
     cabin: Cabin = Cabin.BUSINESS
     cash_trend: CashTrend | None = None  # this cabin's cash fare against earlier searches
-    cash_target: int | None = None  # the round-trip price the owner said they would book at
+    goals: TripGoals = TripGoals()  # what the owner wants from the trip; gates alerts, never the analysis
 
     @property
     def affordable(self) -> list[TripOption]:
         return [option for option in self.ranked if option.affordability.affordable]
+
+    @property
+    def cabin_max(self) -> int | None:
+        """The most the owner would pay for this cabin, round trip, or None."""
+        return self.goals.max_for(self.cabin)
 
 
 def analyze_trip_cabins(
@@ -81,6 +87,6 @@ def _analyze_cabin(
     analysis = TripAnalysis(
         trip=trip, gateways=gateways, ranked=ranked, baseline=baseline, cash_note=note,
         stats=stats, cabin=cabin, cash_trend=trend,
-        cash_target=db.get_cash_targets(conn, trip["id"]).get(cabin.name.lower()),
+        goals=load_goals(conn, trip["id"]),
     )
     return analysis, cash_broken

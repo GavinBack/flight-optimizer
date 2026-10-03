@@ -23,7 +23,7 @@ import requests
 
 from flight_optimizer.alerts import option_key
 from flight_optimizer.analysis import TripAnalysis
-from flight_optimizer.cabins import MILE_VALUE_CENTS, UPGRADE_MAX_MULTIPLE, cabin_label, compare_cabins
+from flight_optimizer.cabins import MILE_VALUE_CENTS, cabin_label, compare_cabins
 from flight_optimizer.connections import COMFORTABLE_CONNECTION_MINUTES
 from flight_optimizer.programs import PROGRAM_NAMES
 from flight_optimizer.taxes import option_taxes
@@ -58,8 +58,12 @@ viable on cost. Often economy is the realistic answer, and that is fine to say.
 Standing facts and rules:
 - Capital One miles are held for flexibility (for example an urgent trip to the UK), so treat the Capital One \
 pool as a reserve as well as a budget. Transfers from Capital One are irreversible.
-- The tool costs a mile at {MILE_VALUE_CENTS:g} cent and flags a better cabin at {UPGRADE_MAX_MULTIPLE:g}x the \
-cheapest way to fly. Those are the owner's accepted settings; do not argue with them.
+- The tool costs a mile at {MILE_VALUE_CENTS:g} cent. That is the owner's accepted setting; do not argue with it.
+- Each trip states the owner's GOALS ("Your goals: ..."): "cheapest" (find the cheapest way to fly economy) \
+and/or "upgrade" (premium economy and business), each cabin with an optional max (the most the owner would pay, \
+round trip, an award counted as miles at {MILE_VALUE_CENTS:g} cent plus taxes) and the upgrade goal with an optional \
+multiple X (flag a better cabin at X times economy or less). Judge each trip against its own goals: say whether \
+an option is within a cabin's max, and do not recommend a cabin the goals leave out, beyond noting it.
 - The owner prefers one ticket over separate bookings (bags, missed-connection cover), same-day connections \
 of 2.5 hours or more, and current data (3 days or newer is current, over 7 days is stale).
 - Each cabin's section shows its cash history (the typical fare from earlier searches, and the lowest) and \
@@ -216,22 +220,34 @@ def computed_facts(
     out = [f"COMPUTED FACTS  {trip['name']}  (the tool's arithmetic: quote these, do not recompute)"]
 
     comparison = compare_cabins(analyses, today)
-    cheapest = comparison.cheapest
-    if cheapest is None:
+    goals = comparison.goals
+    out.append(f"  goals: {goals.describe()}")
+    base_outlook = comparison.cheapest
+    if base_outlook is None:
         out.append("  cabins: nothing priced in any cabin")
     else:
-        base = f"${cheapest.best_cost:,.0f} ({cabin_label(cheapest.cabin)} {cheapest.best_way})"
+        base = f"${base_outlook.best_cost:,.0f} ({cabin_label(base_outlook.cabin)} {base_outlook.best_way})"
         for o in comparison.outlooks:
+            ceiling = goals.max_for(o.cabin)
+            within = "" if ceiling is None or o.best_cost is None else (
+                f", {'within' if o.best_cost <= ceiling else 'OVER'} your ${ceiling:,} max"
+            )
+            scope = "" if goals.covers(o.cabin) else " (not one of the trip's goals)"
             if o.best_cost is None:
-                out.append(f"  {cabin_label(o.cabin)}: no price")
-            elif o.cabin is cheapest.cabin:
-                out.append(f"  {cabin_label(o.cabin)}: ${o.best_cost:,.0f} {o.best_way}, the cheapest way to fly this trip")
+                out.append(f"  {cabin_label(o.cabin)}: no price{scope}")
+            elif o.cabin is base_outlook.cabin:
+                out.append(f"  {cabin_label(o.cabin)}: ${o.best_cost:,.0f} {o.best_way}, the cheapest way to fly this trip"
+                           f"{within}{scope}")
             else:
-                multiple = o.best_cost / cheapest.best_cost
-                verdict = "within" if multiple <= UPGRADE_MAX_MULTIPLE else "OVER"
+                multiple = o.best_cost / base_outlook.best_cost
+                if goals.flags_upgrades:
+                    verdict = (f"{'within' if multiple <= goals.upgrade_multiple else 'OVER'} the "
+                               f"{goals.upgrade_multiple:g}x upgrade line")
+                else:
+                    verdict = "no upgrade multiple set"
                 out.append(
                     f"  {cabin_label(o.cabin)}: ${o.best_cost:,.0f} {o.best_way} = {multiple:.2f}x the cheapest way {base}, "
-                    f"{verdict} the {UPGRADE_MAX_MULTIPLE:g}x upgrade line"
+                    f"{verdict}{within}{scope}"
                 )
 
     for analysis in analyses:
@@ -336,7 +352,7 @@ def fingerprint(
                              a.trip["date_anchor"]],
                     "cabin": a.cabin.name,
                     "cash": None if a.baseline is None else [cash(a.baseline.cabin_total), cash(a.baseline.economy_total)],
-                    "target": a.cash_target,
+                    "goals": repr(a.goals),
                     "affordable": len(a.affordable),
                     "options": [
                         [option_key(o), o.total_miles, round(option_taxes(o).usd / 10), o.affordability.affordable,

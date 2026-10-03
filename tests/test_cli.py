@@ -4,6 +4,7 @@ import pytest
 
 from builders import JAN9, JAN16
 from flight_optimizer import db
+from flight_optimizer.goals import TripGoals, load_goals, update_goals
 from flight_optimizer.__main__ import Clients, main
 from flight_optimizer.notify import NtfyError
 from flight_optimizer.seats_aero import AwardResult, Cabin, FlightOption, TripDetails
@@ -1982,21 +1983,21 @@ def test_the_same_cash_search_is_not_history_twice_across_runs(env):
     assert conn.execute("SELECT COUNT(*) FROM cash_history WHERE cabin = 'economy'").fetchone()[0] == 1
 
 
-def test_a_target_alerts_in_any_cabin_and_is_not_repeated(env):
+def test_a_cabin_max_alerts_in_any_cabin_and_is_not_repeated(env):
     conn, tmp_path = env
-    db.set_cash_target(conn, 1, "business", 2_500)
+    update_goals(conn, 1, business_max=2_500)
 
     _, first = run_cash(["notify"], tmp_path, PRICES)
     _, second = run_cash(["notify"], tmp_path, PRICES)
 
     (alert,) = cash_alerts(first)
-    assert alert["title"] == "Costa Rica: business cash fare at your $2,500 target: $2,400"
+    assert alert["title"] == "Costa Rica: business cash fare within your $2,500 max: $2,400"
     assert cash_alerts(second) == []
 
 
 def test_a_trip_that_is_not_active_gets_no_cash_alerts(env):
     conn, tmp_path = env
-    db.set_cash_target(conn, 1, "economy", 900)
+    update_goals(conn, 1, cheapest_max=900)
     db.set_trip_active(conn, 1, False)
 
     _, ntfy = run_cash(["notify"], tmp_path, PRICES)
@@ -2006,7 +2007,7 @@ def test_a_trip_that_is_not_active_gets_no_cash_alerts(env):
 
 def test_a_dry_run_shows_the_cash_alert_but_sends_and_records_no_alert(env, capsys):
     conn, tmp_path = env
-    db.set_cash_target(conn, 1, "economy", 900)
+    update_goals(conn, 1, cheapest_max=900)
 
     _, ntfy = run_cash(["notify", "--dry-run"], tmp_path, PRICES)
 
@@ -2016,7 +2017,7 @@ def test_a_dry_run_shows_the_cash_alert_but_sends_and_records_no_alert(env, caps
 
 def test_the_digest_counts_cash_alerts(env):
     conn, tmp_path = env
-    db.set_cash_target(conn, 1, "economy", 900)
+    update_goals(conn, 1, cheapest_max=900)
     make_digest_due(conn)
 
     _, ntfy = run_cash(["notify"], tmp_path, PRICES)
@@ -2025,60 +2026,76 @@ def test_the_digest_counts_cash_alerts(env):
     assert line == "Alerts sent in the last 7 days: 1 award, 1 cash-fare."
 
 
-# --- the trip target command --------------------------------------------------------------------------------------------------
+# --- the trip goal command ------------------------------------------------------------------------------------------------
 
-def test_target_can_be_set_shown_and_cleared(env, capsys):
-    conn, tmp_path = env
-
-    run(["trip", "target", "1", "economy", "700"], tmp_path)
-    assert "you will be alerted when the economy cash fare is at or under $700 round trip" in capsys.readouterr().out
-    assert db.get_cash_targets(conn, 1) == {"economy": 700}
-
-    run(["trip", "target", "1"], tmp_path)
-    assert "Costa Rica: economy at or under $700 round trip" in capsys.readouterr().out
-
-    run(["trip", "target", "1", "economy", "--clear"], tmp_path)
-    assert "economy target cleared." in capsys.readouterr().out and db.get_cash_targets(conn, 1) == {}
-
-
-def test_target_with_nothing_set_says_how(env, capsys):
+def test_a_trip_without_goals_shows_the_defaults(env, capsys):
     _, tmp_path = env
 
-    run(["trip", "target", "1"], tmp_path)
+    run(["trip", "goal", "1"], tmp_path)
 
     out = capsys.readouterr().out
-    assert "no cash targets" in out and "trip target 1 economy 700" in out
+    assert "cheapest:  on, economy no max" in out
+    assert "upgrade:   on, premium economy no max, business no max, flag at 1.5x economy" in out
+
+
+def test_goal_maxes_and_the_multiple_can_be_set_and_cleared(env, capsys):
+    conn, tmp_path = env
+
+    run(["trip", "goal", "1", "--cheapest-max", "700", "--business-max", "$2,000", "--upgrade-multiple", "1.8x"],
+        tmp_path)
+    goals = load_goals(conn, 1)
+    assert (goals.cheapest_max, goals.business_max, goals.upgrade_multiple) == (700, 2_000, 1.8)
+    assert "business $2,000, flag at 1.8x economy" in capsys.readouterr().out
+
+    run(["trip", "goal", "1", "--cheapest-max", "none", "--upgrade-multiple", "none"], tmp_path)
+    goals = load_goals(conn, 1)
+    assert (goals.cheapest_max, goals.business_max, goals.upgrade_multiple) == (None, 2_000, None)
+
+
+def test_a_trip_can_drop_a_goal_but_not_both(env, capsys):
+    conn, tmp_path = env
+
+    run(["trip", "goal", "1", "--no-cheapest"], tmp_path)
+    assert (load_goals(conn, 1).cheapest, load_goals(conn, 1).upgrade) == (False, True)
+
+    code, _, _ = run(["trip", "goal", "1", "--no-upgrade"], tmp_path)
+    assert code == 1 and "make it inactive instead" in capsys.readouterr().err
+    assert load_goals(conn, 1).upgrade is True
+
+
+def test_setting_a_max_turns_its_goal_on_unless_it_was_just_turned_off(env, capsys):
+    conn, tmp_path = env
+    run(["trip", "goal", "1", "--no-upgrade"], tmp_path)
+    capsys.readouterr()
+
+    run(["trip", "goal", "1", "--business-max", "2000"], tmp_path)
+    assert load_goals(conn, 1).upgrade is True and "setting its limits turned it on" in capsys.readouterr().out
+
+    code, _, _ = run(["trip", "goal", "1", "--no-cheapest", "--cheapest-max", "500"], tmp_path)
+    assert code == 1 and "same command" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("argv, message", [
-    (["trip", "target", "1", "economy"], "Give an amount in dollars, or --clear."),
-    (["trip", "target", "1", "economy", "0"], "more than zero"),
-    (["trip", "target", "1", "economy", "-5"], "more than zero"),
-    (["trip", "target", "99", "economy", "700"], "No trip with id 99"),
+    (["trip", "goal", "1", "--cheapest-max", "0"], "more than $0"),
+    (["trip", "goal", "1", "--business-max", "cheap"], "amount in dollars"),
+    (["trip", "goal", "1", "--upgrade-multiple", "0.8"], "more than 1"),
+    (["trip", "goal", "99", "--cheapest-max", "700"], "No trip with id 99"),
 ])
-def test_bad_target_input_is_refused(env, capsys, argv, message):
+def test_bad_goal_input_is_refused(env, capsys, argv, message):
     conn, tmp_path = env
 
     code, _, _ = run(argv, tmp_path)
 
-    assert code == 1 and message in capsys.readouterr().err and db.get_cash_targets(conn, 1) == {}
+    assert code == 1 and message in capsys.readouterr().err and load_goals(conn, 1) == TripGoals()
 
 
-def test_target_only_accepts_a_real_cabin(env):
+def test_the_old_target_command_is_gone(env):
     _, tmp_path = env
 
     with pytest.raises(SystemExit) as excinfo:
-        run(["trip", "target", "1", "first", "900"], tmp_path)
+        run(["trip", "target", "1", "economy", "700"], tmp_path)
 
     assert excinfo.value.code == 2
-
-
-def test_clearing_a_target_that_was_never_set_says_so(env, capsys):
-    _, tmp_path = env
-
-    run(["trip", "target", "1", "economy", "--clear"], tmp_path)
-
-    assert "was not set" in capsys.readouterr().out
 
 
 # --- what the dates mean: departure by default, arrival only when asked ----------------------------

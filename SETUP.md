@@ -136,10 +136,10 @@ The programs are `capital_one`, `delta`, `american`, `united`, `qantas`, `atmos`
 
 Capital One miles are treated as a shared pool that can move 1 to 1 into Aeroplan, LifeMiles, Flying Blue, Avios, Qantas and Virgin Atlantic (5 to 3 into JetBlue). If you hold no Capital One miles, leave that at 0 and enter the balances of the programs you do hold.
 
-**Optional: set a cash price target.** You get an alert when a cabin's round-trip cash fare reaches it:
+**Optional: set your goals.** By default a trip watches for the cheapest way to fly and for a better seat at up to 1.5 times the cheapest price. You can set the most you would pay per cabin, turn a goal off, or change the multiple:
 
 ```
-python -m flight_optimizer trip target 1 business 2500
+python -m flight_optimizer trip goal 1 --cheapest-max 650 --business-max 2500
 ```
 
 ## 6. Run it once by hand
@@ -226,7 +226,7 @@ A few numbers in the code reflect the original owner's choices, and you may want
 | Setting | File | What it does |
 |---|---|---|
 | `MILE_VALUE_CENTS` (1.0) | `flight_optimizer/cabins.py` | What a mile is worth when comparing an award with a cash fare. |
-| `UPGRADE_MAX_MULTIPLE` (1.5) | `flight_optimizer/cabins.py` | How much more than the cheapest option a better cabin can cost before the app flags it. |
+| `DEFAULT_UPGRADE_MULTIPLE` (1.5) | `flight_optimizer/goals.py` | The default for how much more than the cheapest option a better cabin can cost before the app flags it. Each trip can set its own with `trip goal --upgrade-multiple`. |
 | `USD_PER_UNIT` | `flight_optimizer/taxes.py` | Approximate exchange rates for award taxes. Update them when they drift. |
 | `RETAIL_PRICES` | `flight_optimizer/buying.py` | Estimated price of buying miles at each program. |
 | `CAPITAL_ONE_TRANSFERS` and `TRANSFER_TIMES` | `flight_optimizer/affordability.py` | Which programs a shortfall can be topped up from, and how long each transfer takes. Edit them if you hold points in a different bank program. |

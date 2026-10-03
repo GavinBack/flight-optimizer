@@ -5,7 +5,7 @@ import pytest
 from builders import add_trip, analysis_for, fare
 from flight_optimizer import db
 from flight_optimizer.cash_alerts import (
-    DROP_DOLLARS, DROP_PERCENT, MIN_HISTORY, decide_cash_alert, is_drop, at_target, record_cash_alert_sent,
+    DROP_DOLLARS, DROP_PERCENT, MIN_HISTORY, decide_cash_alert, is_drop, at_max, record_cash_alert_sent,
 )
 from flight_optimizer.cashtrend import CashTrend, load_trend
 from flight_optimizer.savings import TripBaseline
@@ -42,7 +42,13 @@ def cash_analysis(conn, total, previous=(), *, cabin=Cabin.ECONOMY, target=None,
 def analysis(conn, total, previous=(), **kwargs):
     from dataclasses import replace
     a, t, target = cash_analysis(conn, total, previous, **kwargs)
-    return replace(a, cash_trend=t, cash_target=target)
+    return replace(a, cash_trend=t, goals=goals_with_max(a.cabin, target))
+
+
+def goals_with_max(cabin, amount, **other):
+    from flight_optimizer.goals import TripGoals
+    field = {Cabin.ECONOMY: "cheapest_max", Cabin.PREMIUM_ECONOMY: "premium_economy_max", Cabin.BUSINESS: "business_max"}[cabin]
+    return TripGoals(**({field: amount} if amount is not None else {}), **other)
 
 
 # --- the history ---------------------------------------------------------------------------------------------------
@@ -142,16 +148,33 @@ def test_the_thresholds_are_inclusive(conn):
     assert not is_drop(analysis(conn, 631, [700, 700, 700]))
 
 
-# --- the target rule ---------------------------------------------------------------------------------------------
+# --- the max rule (the trip's goals) ---------------------------------------------------------------------------------------------
 
-def test_a_fare_at_or_under_the_target_qualifies_in_any_cabin(conn):
-    assert at_target(analysis(conn, 700, target=700, cabin=Cabin.BUSINESS))
-    assert at_target(analysis(conn, 650, target=700, cabin=Cabin.PREMIUM_ECONOMY))
-    assert not at_target(analysis(conn, 701, target=700))
+def test_a_fare_at_or_under_the_cabins_max_qualifies_in_any_cabin(conn):
+    assert at_max(analysis(conn, 700, target=700, cabin=Cabin.BUSINESS))
+    assert at_max(analysis(conn, 650, target=700, cabin=Cabin.PREMIUM_ECONOMY))
+    assert not at_max(analysis(conn, 701, target=700))
 
 
-def test_no_target_means_no_target_alert(conn):
-    assert not at_target(analysis(conn, 100, target=None))
+def test_no_max_means_no_max_alert(conn):
+    assert not at_max(analysis(conn, 100, target=None))
+
+
+def test_with_an_economy_max_a_drop_above_it_is_not_news(conn):
+    # a real drop (620 against a typical 705), but still above the $600 the owner would pay
+    assert decide_cash_alert(conn, analysis(conn, 620, [700, 720, 690, 710], target=600), now=NOW) is None
+    assert not is_drop(analysis(conn, 620, [700, 720, 690, 710], target=600))
+
+
+def test_a_cabin_the_goals_leave_out_gets_no_cash_alert(conn):
+    from dataclasses import replace
+    from flight_optimizer.goals import TripGoals
+    upgrade_only = replace(analysis(conn, 620, [700, 720, 690, 710]), goals=TripGoals(cheapest=False))
+    cheapest_only = replace(analysis(conn, 1_400, cabin=Cabin.BUSINESS),
+                            goals=TripGoals(upgrade=False, cheapest_max=900))
+
+    assert decide_cash_alert(conn, upgrade_only, now=NOW) is None
+    assert decide_cash_alert(conn, cheapest_only, now=NOW) is None
 
 
 # --- the alert -----------------------------------------------------------------------------------------------------
@@ -168,18 +191,18 @@ def test_a_drop_alert_states_the_fare_the_history_and_the_date(conn):
     assert "Cash fares as of 2026-09-21. Fares change fast: verify before booking." in lines
 
 
-def test_a_target_alert_names_the_target(conn):
+def test_a_max_alert_names_the_max(conn):
     alert = decide_cash_alert(conn, analysis(conn, 690, target=700, cabin=Cabin.BUSINESS), now=NOW)
 
-    assert alert.kind == "target" and alert.title == "Costa Rica: business cash fare at your $700 target: $690"
-    assert "At or under your $700 target." in alert.message.split("\n")
+    assert alert.kind == "max" and alert.title == "Costa Rica: business cash fare within your $700 max: $690"
+    assert "At or under your $700 business max." in alert.message.split("\n")
     assert "(business cash)" in alert.message.split("\n")[0]
 
 
-def test_a_target_wins_when_the_fare_is_also_a_drop(conn):
+def test_a_max_wins_when_the_fare_is_also_a_drop(conn):
     alert = decide_cash_alert(conn, analysis(conn, 620, [700, 720, 690, 710], target=650), now=NOW)
 
-    assert alert.kind == "target" and "Typical lately" in alert.message
+    assert alert.kind == "max" and "Typical lately" in alert.message
 
 
 def test_nothing_notable_means_no_alert(conn):
@@ -216,7 +239,7 @@ def test_the_same_news_is_not_repeated_within_a_week_unless_the_fare_fell_furthe
     assert decide_cash_alert(conn, analysis(conn, 620, [700, 720, 690, 710], trip=trip), now=NOW + timedelta(days=8)) is not None
 
 
-def test_a_drop_and_a_target_are_separate_alerts(conn):
+def test_a_drop_and_a_max_are_separate_alerts(conn):
     trip = add_trip(conn)
     drop = decide_cash_alert(conn, analysis(conn, 620, [700, 720, 690, 710], trip=trip), now=NOW)
     record_cash_alert_sent(conn, drop)
@@ -243,28 +266,3 @@ def test_sent_alerts_are_recorded_as_cash_alerts_with_their_price(conn):
 
     row = conn.execute("SELECT * FROM alert_history").fetchone()
     assert (row["alert_type"], row["cash_price"], row["dedupe_key"]) == ("cash", 620, "cash:ECONOMY:drop")
-
-
-# --- targets in the database --------------------------------------------------------------------------------------------
-
-def test_targets_are_saved_replaced_and_cleared_per_cabin(conn):
-    trip = add_trip(conn)
-    db.set_cash_target(conn, trip["id"], "economy", 700)
-    db.set_cash_target(conn, trip["id"], "business", 1_500)
-    db.set_cash_target(conn, trip["id"], "economy", 650)
-
-    assert db.get_cash_targets(conn, trip["id"]) == {"economy": 650, "business": 1_500}
-    assert db.clear_cash_target(conn, trip["id"], "economy") is True
-    assert db.clear_cash_target(conn, trip["id"], "economy") is False
-    assert db.get_cash_targets(conn, trip["id"]) == {"business": 1_500}
-
-
-def test_bad_targets_are_refused(conn):
-    trip = add_trip(conn)
-
-    with pytest.raises(ValueError, match="more than zero"):
-        db.set_cash_target(conn, trip["id"], "economy", 0)
-    with pytest.raises(ValueError, match="Unknown cabin"):
-        db.set_cash_target(conn, trip["id"], "steerage", 100)
-    with pytest.raises(LookupError):
-        db.set_cash_target(conn, 999, "economy", 100)

@@ -156,17 +156,28 @@ You can change these:
 - `--flexible` or `--exact` turns the 3-day windows on or off for both dates. `--flexible-outbound` / `--exact-outbound` and `--flexible-return` / `--exact-return` change one date only.
 - `--active` or `--inactive` starts or stops searching and alerts. An inactive trip sends no alerts at all, however good the deal.
 
-### Set a cash price target
+### Set your goals for a trip
 
 ```
-python -m flight_optimizer trip target 1
-python -m flight_optimizer trip target 1 business 2500
-python -m flight_optimizer trip target 1 business --clear
+python -m flight_optimizer trip goal 1
+python -m flight_optimizer trip goal 1 --cheapest-max 650
+python -m flight_optimizer trip goal 1 --business-max 2000 --upgrade-multiple 1.8
+python -m flight_optimizer trip goal 1 --no-cheapest
+python -m flight_optimizer trip goal 1 --business-max none
 ```
 
-A target is the round-trip cash price you would happily pay. You get an alert when the cash fare reaches it. You can set one for each cabin. With just a trip number, the command shows the targets you have set.
+Each trip has one or both of two goals:
 
-Separately, the app alerts you on its own when an economy fare drops to a new 30-day low that is also clearly below its usual price. That needs about a week of price history before it can start.
+- **Cheapest** (`--cheapest` / `--no-cheapest`): find the cheapest way to fly, in economy.
+- **Upgrade** (`--upgrade` / `--no-upgrade`): watch for a better seat, in premium economy or business.
+
+For each cabin you can set a **max**: the most you would pay for the round trip (`--cheapest-max`, `--premium-economy-max`, `--business-max`). An award counts as its miles at 1 cent each plus its taxes. Alerts for that cabin fire only at or under the max, and the cash fare reaching it is an alert in itself.
+
+The upgrade goal can also **flag a better cabin** that costs at most X times the cheapest way to fly (`--upgrade-multiple`, 1.5 unless you change it). `none` clears a max or turns the flag off.
+
+Goals only decide what you are alerted about. Every cabin is still searched and shown in the report. A trip needs at least one goal; to stop all alerts, make it inactive. With just a trip number, the command shows its goals.
+
+Separately, when economy has no max, the app alerts you on its own when an economy fare drops to a new 30-day low that is also clearly below its usual price. That needs about a week of price history before it can start.
 
 ### Choose the hub airports
 
@@ -216,7 +227,7 @@ You may get these messages on your phone:
 
 - **Award alert.** There is a good, affordable award option whose data is fresh. It shows the urgency (based on how many seats are left) and roughly what it costs in miles plus taxes and fees. Details are in `plan`.
 - **Better cabin.** A cabin above the cheapest one has come within about 1.5 times the price of the cheapest way to fly.
-- **Cash fare.** A fare hit your target or dropped to a new low.
+- **Cash fare.** A fare reached your max for that cabin, or dropped to a new low.
 - **Buy-miles sale.** A sale makes topping up your miles worthwhile.
 - **Weekly digest.** A quiet summary sent every 7 days, so you know the tool is still working even when nothing else was worth an alert.
 - **Flight check ...** messages. These are about the tool, not your trip. They mean something failed (a search, cash prices or the Claude advice) or that a daily run was missed because the Mac was off or asleep.

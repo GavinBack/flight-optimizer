@@ -4,8 +4,9 @@ import pytest
 
 from builders import RECENT, add_trip, analysis_for, fare, good_option
 from flight_optimizer import db
+from flight_optimizer.goals import DEFAULT_UPGRADE_MULTIPLE
 from flight_optimizer.cabins import (
-    MILE_VALUE_CENTS, UPGRADE_MAX_MULTIPLE, CabinOutlook, cabin_label, compare_cabins, outlook_for,
+    MILE_VALUE_CENTS, CabinOutlook, cabin_label, compare_cabins, outlook_for,
 )
 from flight_optimizer.report import render_comparison
 from flight_optimizer.savings import TripBaseline
@@ -43,7 +44,7 @@ def analyses(conn, *, economy=620, premium=None, business=None, business_options
 
 
 def test_the_assumptions_are_stated_as_constants():
-    assert MILE_VALUE_CENTS == 1.0 and UPGRADE_MAX_MULTIPLE == 1.5
+    assert MILE_VALUE_CENTS == 1.0 and DEFAULT_UPGRADE_MULTIPLE == 1.5
 
 
 def test_cabin_labels_are_plain_words():

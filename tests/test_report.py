@@ -769,26 +769,26 @@ def test_a_report_records_each_cabins_cash_total_as_history(conn):
     assert [(r["cabin"], r["total"]) for r in rows] == [("business", 2_000), ("economy", 600), ("premium_economy", 600)]
 
 
-def test_the_report_shows_history_and_the_target(conn):
+def test_the_report_shows_history_and_the_cabin_max(conn):
     from flight_optimizer.cashtrend import CashTrend
 
     trip = add_trip(conn)
     trend = CashTrend(current=699, previous=(760, 720, 740), first_seen=date(2026, 9, 12))
 
-    text = render_trip(trip, ["LAX"], [], BASELINE, BALANCES, today=TODAY, cabin=Cabin.ECONOMY, cash_trend=trend, cash_target=700)
+    text = render_trip(trip, ["LAX"], [], BASELINE, BALANCES, today=TODAY, cabin=Cabin.ECONOMY, cash_trend=trend, cabin_max=700)
 
     assert "economy cash history: 3 earlier searches since Sep 12, low $720, typical $740" in text
-    assert "your economy target: $700 (not reached)" in text or "your economy target: $700 (reached)" in text
+    assert "your economy max: $700 (cash is within it)" in text or "your economy max: $700 (cash is above it)" in text
 
 
-def test_the_target_line_says_whether_it_was_reached(conn):
+def test_the_max_line_says_whether_cash_is_within_it(conn):
     trip = add_trip(conn)
     at_700 = TripBaseline(cabin_fares=(fare(350), fare(340)), economy_fares=(fare(350), fare(340)))
 
-    reached = render_trip(trip, [], [], at_700, BALANCES, today=TODAY, cabin=Cabin.ECONOMY, cash_target=700)
-    missed = render_trip(trip, [], [], at_700, BALANCES, today=TODAY, cabin=Cabin.ECONOMY, cash_target=600)
+    reached = render_trip(trip, [], [], at_700, BALANCES, today=TODAY, cabin=Cabin.ECONOMY, cabin_max=700)
+    missed = render_trip(trip, [], [], at_700, BALANCES, today=TODAY, cabin=Cabin.ECONOMY, cabin_max=600)
 
-    assert "target: $700 (reached)" in reached and "target: $600 (not reached)" in missed
+    assert "max: $700 (cash is within it)" in reached and "max: $600 (cash is above it)" in missed
 
 
 def test_a_first_search_says_there_is_nothing_to_compare_with_yet(conn):
@@ -802,7 +802,7 @@ def test_a_first_search_says_there_is_nothing_to_compare_with_yet(conn):
 def test_no_history_lines_without_history_data(conn):
     text = render(conn, [])
 
-    assert "cash history" not in text and "target" not in text
+    assert "cash history" not in text and "max:" not in text
 
 
 # --- award taxes --------------------------------------------------------------------------------------------------------

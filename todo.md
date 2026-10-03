@@ -24,7 +24,7 @@ These block design choices further down.
 - [x] Pick where the scheduler runs: a local launchd job on the owner's Mac (decided; see section 2).
 - [x] Pick a language and stack: Python 3.12 with a `.venv` virtual environment, SQLite for storage.
 - [x] Decide how "good" is measured, since this drives the rules engine:
-  - [x] Cash threshold per trip and cabin (the "$X" in the README): `trip target TRIP CABIN AMOUNT` (2026-09-21). The old `trips.max_cash_price` column was dropped.
+  - [x] Cash threshold per trip and cabin (the "$X" in the README): `trip target TRIP CABIN AMOUNT` (2026-09-21), now per-cabin maxes on the trip's goals (`trip goal`, 2026-10-03). The old `trips.max_cash_price` column was dropped.
   - [x] Max miles: none. Trips are uncapped, and the `max_miles` column was dropped (2026-09-21). Whether an award is worth its miles is judged by cents per mile after taxes against the 1 cent floor.
   - [x] N days before re-alerting on the same result: 7 (`RE_ALERT_DAYS`), unless it got cheaper.
 
@@ -142,7 +142,8 @@ Separate alert type. It depends on at least one active trip.
 
 - [x] Multiple saved trips (2026-09-21): `python -m flight_optimizer trip [list|add|set]` adds, lists and changes trips (validated: airport codes, dates, gateways, and duplicate routes are refused). The report, daily check and digest already loop over every active trip. Commands that need one trip ask which (`Say which trip: 1 (Costa Rica), 2 (Kelowna)`). Trip 2 added: Kelowna, RNO > YLW, Dec 22 to Dec 28 2026, gateways SEA, LAX, PHX.
 - [x] **Every trip is evaluated in economy, premium economy and business** (2026-09-21, owner's rule; the per-trip `--cabin` option is gone). Goals: 1. the best price and options for each trip; 2. notice when a better cabin becomes viable on cost. Built: one shared Seats.aero search per trip (no extra calls), per-cabin analysis, a "cabins at a glance" report section, per-cabin alerts and plans, a better-cabin alert for close cash fares, and a digest line. See CLAUDE.md for the design.
-  - [x] Mile value (`MILE_VALUE_CENTS`, 1.0) and upgrade multiple (`UPGRADE_MAX_MULTIPLE`, 1.5) accepted by the owner, 2026-09-21.
+  - [x] Mile value (`MILE_VALUE_CENTS`, 1.0) and upgrade multiple (1.5) accepted by the owner, 2026-09-21. The multiple is per trip since 2026-10-03 (`trip goal --upgrade-multiple`, default `goals.DEFAULT_UPGRADE_MULTIPLE`).
+  - [x] Per-trip goals (2026-10-03): cheapest and/or upgrade, a max per cabin (alert threshold), and the upgrade multiple.
   - [ ] **Earn and "gaming" model, on hold.** The owner's insight: a business fare earns miles faster, and miles can be traded, so business can cost less than its listing. The owner is not chasing a specific program now and will research that separately (the Capital One card is for flexibility, e.g. an urgent UK trip), so no per-program earn-rate research yet. When a program is chosen: subtract the value of the miles and status a cabin earns from its cost, using only legitimate earn and redemption effects.
   - [ ] Capital One is a flexibility reserve (e.g. an urgent UK trip). When joint evaluation is built, consider showing how much of the pool an option leaves untouched.
   - [ ] Premium economy is thin: no premium economy award space was found through LAX for either trip, and Google returned no premium economy cash fares for RNO to SJO. Worth checking whether that changes closer to the dates.

@@ -188,7 +188,7 @@ def test_the_brief_says_no_balances_when_none_are_set(conn):
 
 
 def test_the_system_prompt_states_the_owners_rules():
-    for fact in ("never book", "reserve", "irreversible", "1 cent", "1.5x", "not instructions", "SHARED BALANCES".lower(),
+    for fact in ("never book", "reserve", "irreversible", "1 cent", "GOALS", "not instructions", "SHARED BALANCES".lower(),
                  "Use only figures that appear in the report"):
         assert fact.lower() in SYSTEM_PROMPT.lower()
 

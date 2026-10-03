@@ -5,6 +5,8 @@ import sqlite3
 from datetime import date
 from pathlib import Path
 
+from flight_optimizer.goals import DEFAULT_UPGRADE_MULTIPLE
+
 # Programs whose balances are tracked (README, "Inputs", plus Capital One transfer
 # partners and other programs that appear in Seats.aero results).
 PROGRAMS = (
@@ -78,12 +80,17 @@ CREATE TABLE IF NOT EXISTS cash_history (
     PRIMARY KEY (trip_id, cabin, fetched_at)
 );
 
--- A round-trip cash price the owner would book at, per trip and cabin.
-CREATE TABLE IF NOT EXISTS cash_targets (
-    trip_id INTEGER NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
-    cabin   TEXT NOT NULL,
-    price   INTEGER NOT NULL CHECK (price > 0),
-    PRIMARY KEY (trip_id, cabin)
+-- What the owner wants from a trip (goals.py). No row: the defaults, both goals and a 1.5x flag.
+-- Maxes are round-trip dollars per cabin and gate that cabin's alerts; NULL is no ceiling.
+CREATE TABLE IF NOT EXISTS trip_goals (
+    trip_id             INTEGER PRIMARY KEY REFERENCES trips(id) ON DELETE CASCADE,
+    cheapest            INTEGER NOT NULL DEFAULT 1 CHECK (cheapest IN (0, 1)),
+    upgrade             INTEGER NOT NULL DEFAULT 1 CHECK (upgrade IN (0, 1)),
+    cheapest_max        INTEGER CHECK (cheapest_max IS NULL OR cheapest_max > 0),
+    premium_economy_max INTEGER CHECK (premium_economy_max IS NULL OR premium_economy_max > 0),
+    business_max        INTEGER CHECK (business_max IS NULL OR business_max > 0),
+    upgrade_multiple    REAL CHECK (upgrade_multiple IS NULL OR upgrade_multiple > 1),  -- NULL: no relative flag
+    CHECK (cheapest = 1 OR upgrade = 1)
 );
 
 -- Seats.aero flight details, keyed by the search row's own UpdatedAt stamp. That stamp
@@ -208,12 +215,34 @@ def init_schema(conn: sqlite3.Connection) -> None:
             if "flexible" in columns:
                 conn.execute("UPDATE trips SET outbound_flexible = flexible, return_flexible = flexible")
                 conn.execute("ALTER TABLE trips DROP COLUMN flexible")
+    _migrate_cash_targets(conn)
     retired = [name for name in RETIRED_TRIP_COLUMNS if name in columns]
     if retired:
         _backup_before_migration(conn)
         with conn:
             for name in retired:
                 conn.execute(f"ALTER TABLE trips DROP COLUMN {name}")
+
+
+_TARGET_TO_GOAL = {"economy": "cheapest_max", "premium_economy": "premium_economy_max", "business": "business_max"}
+
+
+def _migrate_cash_targets(conn: sqlite3.Connection) -> None:
+    """2026-10-03: per-cabin cash targets became the per-cabin maxes on the trip's goals (goals.py)."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cash_targets'").fetchone() is None:
+        return
+    _backup_before_migration(conn)
+    with conn:
+        for row in conn.execute("SELECT trip_id, cabin, price FROM cash_targets").fetchall():
+            column = _TARGET_TO_GOAL.get(row["cabin"])
+            if column is None:
+                continue  # a cabin goals do not cover (first): nothing to carry over
+            conn.execute(
+                "INSERT OR IGNORE INTO trip_goals (trip_id, upgrade_multiple) VALUES (?, ?)",
+                (row["trip_id"], DEFAULT_UPGRADE_MULTIPLE),
+            )
+            conn.execute(f"UPDATE trip_goals SET {column} = ? WHERE trip_id = ?", (row["price"], row["trip_id"]))
+        conn.execute("DROP TABLE cash_targets")
 
 
 def add_trip(
@@ -366,33 +395,6 @@ def cash_history(conn: sqlite3.Connection, trip_id: int, cabin: str, since: str)
         (trip_id, cabin, since),
     ).fetchall()
     return [(row["fetched_at"], row["total"]) for row in rows]
-
-
-def set_cash_target(conn: sqlite3.Connection, trip_id: int, cabin: str, price: int) -> None:
-    if cabin not in CABINS:
-        raise ValueError(f"Unknown cabin {cabin!r}; expected one of {CABINS}")
-    if price <= 0:
-        raise ValueError("A cash target must be more than zero.")
-    if conn.execute("SELECT 1 FROM trips WHERE id = ?", (trip_id,)).fetchone() is None:
-        raise LookupError(f"No trip with id {trip_id}")
-    with conn:
-        conn.execute(
-            "INSERT INTO cash_targets (trip_id, cabin, price) VALUES (?, ?, ?)"
-            " ON CONFLICT(trip_id, cabin) DO UPDATE SET price = excluded.price",
-            (trip_id, cabin, price),
-        )
-
-
-def clear_cash_target(conn: sqlite3.Connection, trip_id: int, cabin: str) -> bool:
-    """True if there was a target to remove."""
-    with conn:
-        cur = conn.execute("DELETE FROM cash_targets WHERE trip_id = ? AND cabin = ?", (trip_id, cabin))
-    return cur.rowcount > 0
-
-
-def get_cash_targets(conn: sqlite3.Connection, trip_id: int) -> dict[str, int]:
-    rows = conn.execute("SELECT cabin, price FROM cash_targets WHERE trip_id = ?", (trip_id,)).fetchall()
-    return {row["cabin"]: row["price"] for row in rows}
 
 
 def set_trip_active(conn: sqlite3.Connection, trip_id: int, active: bool) -> None:

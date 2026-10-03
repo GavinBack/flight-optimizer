@@ -7,7 +7,7 @@ from flight_optimizer import db
 from flight_optimizer.affordability import SOURCE_TO_PROGRAM, TripOption, slow_transfers
 from flight_optimizer.analysis import TripAnalysis, analyze_trip_cabins
 from flight_optimizer.cabins import (
-    MILE_VALUE_CENTS, UPGRADE_MAX_MULTIPLE, CabinComparison, cabin_label, compare_cabins,
+    MILE_VALUE_CENTS, CabinComparison, cabin_label, compare_cabins,
 )
 from flight_optimizer.cashtrend import CashTrend
 from flight_optimizer.buying import ESTIMATE_NOTE, BuyPlan, Purchase, rank_buy_plans
@@ -358,7 +358,10 @@ def _money(amount: float | None) -> str:
 def render_comparison(comparison: CabinComparison) -> str:
     """One trip across cabins: what each costs by cash or affordable award, and any worthwhile upgrade."""
     trip = comparison.trip
+    goals = comparison.goals
     out = [RULE, f"{trip['name']}   {trip['origin']} > {trip['destination']}   CABINS AT A GLANCE", RULE, ""]
+    out.append(f"  Your goals: {goals.describe()}   (change with: python -m flight_optimizer trip goal {trip['id']})")
+    out.append("")
     out.append(f"  {'cabin':<17}{'cash':>9}   {'affordable award (miles + taxes)':<46}{'cheapest way':>14}")
     cheapest = comparison.cheapest
     upgrades = {u.outlook.cabin: u for u in comparison.upgrades}
@@ -371,6 +374,11 @@ def render_comparison(comparison: CabinComparison) -> str:
             award = "none you can afford" if o.offered else "none found"
         way = "-" if o.best_cost is None else f"{_money(o.best_cost)} {o.best_way}"
         line = f"  {cabin_label(o.cabin):<17}{_money(o.cash):>9}   {award:<46}{way:>14}"
+        ceiling = goals.max_for(o.cabin) if goals.covers(o.cabin) else None
+        if not goals.covers(o.cabin):
+            line += "   (not a goal: no alerts)"
+        elif ceiling is not None:
+            line += f"   max ${ceiling:,}" + (" (within)" if o.best_cost is not None and o.best_cost <= ceiling else "")
         if cheapest is not None and o.cabin is cheapest.cabin:
             line += "   cheapest"
         elif o.cabin in upgrades:
@@ -384,10 +392,13 @@ def render_comparison(comparison: CabinComparison) -> str:
         f"  Awards are costed at {MILE_VALUE_CENTS:g} cent per mile (assumed: Capital One's travel-eraser rate)"
         " plus their taxes and fees in dollars (approximate exchange rates)."
     )
-    out.append(
-        f"  A better cabin is flagged when it costs at most {UPGRADE_MAX_MULTIPLE:g}x the cheapest way to fly."
-        " Only awards you can afford on non-stale data count."
-    )
+    if goals.flags_upgrades:
+        out.append(
+            f"  A better cabin is flagged when it costs at most {goals.upgrade_multiple:g}x the cheapest way to fly (your goal)"
+            " and no more than its max. Only awards you can afford on non-stale data count."
+        )
+    else:
+        out.append("  Better cabins are not flagged: your goals set no upgrade multiple.")
     out.append("  Miles and status earned by a better cabin are not counted, so real upgrades cost less than shown.")
     if any_flexible(trip):
         out.append(
@@ -408,7 +419,7 @@ def render_trip(
     stats: EnrichmentStats | None = None,
     cabin: Cabin = Cabin.BUSINESS,
     cash_trend: CashTrend | None = None,
-    cash_target: int | None = None,
+    cabin_max: int | None = None,
     top_n: int = 5,
     near_n: int = 3,
     buy_n: int = 3,
@@ -458,9 +469,9 @@ def render_trip(
                 )
             else:
                 out.append(f"  {cabin_name} cash history: this is the first search kept, so there is nothing to compare with yet")
-        if cash_target is not None:
-            state = "reached" if baseline.cabin_total is not None and baseline.cabin_total <= cash_target else "not reached"
-            out.append(f"  your {cabin_name} target: ${cash_target:,} ({state})")
+        if cabin_max is not None:
+            state = "within it" if baseline.cabin_total is not None and baseline.cabin_total <= cabin_max else "above it"
+            out.append(f"  your {cabin_name} max: ${cabin_max:,} (cash is {state})")
 
     affordable = [o for o in ranked if o.affordability.affordable]
     misses = [o for o in ranked if not o.affordability.affordable]
@@ -575,7 +586,8 @@ def render_trip_sections(
             render_trip(
                 analysis.trip, analysis.gateways, analysis.ranked, analysis.baseline, balances,
                 cash_note=analysis.cash_note, stats=analysis.stats, cabin=analysis.cabin,
-                cash_trend=analysis.cash_trend, cash_target=analysis.cash_target,
+                cash_trend=analysis.cash_trend,
+                cabin_max=analysis.cabin_max if analysis.goals.covers(analysis.cabin) else None,
                 top_n=top_n, near_n=near_n, buy_n=buy_n, promos=promos, today=today,
             )
         )

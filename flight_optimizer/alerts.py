@@ -13,7 +13,7 @@ from flight_optimizer import db
 from flight_optimizer.affordability import TripOption, slow_transfers
 from flight_optimizer.buying import BuyPlan, promo_threshold_cents, rank_buy_plans
 from flight_optimizer.analysis import TripAnalysis
-from flight_optimizer.cabins import MILE_VALUE_CENTS, UPGRADE_MAX_MULTIPLE, Upgrade, cabin_label, compare_cabins
+from flight_optimizer.cabins import MILE_VALUE_CENTS, Upgrade, award_cost, cabin_label, compare_cabins
 from flight_optimizer.connections import ConnectionClass
 from flight_optimizer.itineraries import Freshness, is_stale
 from flight_optimizer.promos import Promo
@@ -210,12 +210,16 @@ def worth_the_miles(analysis: TripAnalysis, option: TripOption) -> bool:
 
 
 def usable_for_alert(analysis: TripAnalysis, today: date) -> list[TripOption]:
-    """Affordable options whose data is not stale and whose miles beat paying cash. Offers and
-    availability should be current, so an option resting on old data is never alerted on (the
-    report still lists it)."""
+    """Affordable options whose data is not stale and whose miles beat paying cash, in a cabin the trip's
+    goals cover and at or under that cabin's max (`goals.py`). Offers and availability should be current,
+    so an option resting on old data is never alerted on (the report still lists it)."""
+    goals = analysis.goals
+    if not goals.covers(analysis.cabin):
+        return []
     return [
         o for o in analysis.affordable
         if o.freshness(today) is not Freshness.STALE and worth_the_miles(analysis, o)
+        and goals.within_max(analysis.cabin, award_cost(o))
     ]
 
 
@@ -293,14 +297,24 @@ def qualifying_plan(analysis: TripAnalysis, promos: dict[str, Promo], today: dat
     program's price threshold, and a balance that is short for the trip's redemption. Options
     resting on stale data never qualify, matching the freshness rule for award alerts.
     """
+    if not analysis.goals.covers(analysis.cabin):
+        return None
     misses = [
         o for o in analysis.ranked
         if not o.affordability.affordable and o.freshness(today) is not Freshness.STALE
     ]
     for plan in rank_buy_plans(misses, today, promos):
-        if plan.uses_promo and all(qualifies(p) for p in plan.purchases):
+        if (plan.uses_promo and all(qualifies(p) for p in plan.purchases)
+                and analysis.goals.within_max(analysis.cabin, buy_plan_cost(plan))):
             return plan
     return None
+
+
+def buy_plan_cost(plan: BuyPlan) -> float:
+    """A buy-miles plan all in: the miles you already have at `MILE_VALUE_CENTS`, the purchase, and the taxes."""
+    bought = sum(p.shortfall for p in plan.purchases)
+    own = plan.option.total_miles - bought
+    return own * MILE_VALUE_CENTS / 100 + plan.total_cost + option_taxes(plan.option).usd
 
 
 def _promo_key(plan: BuyPlan) -> str:
@@ -386,7 +400,8 @@ def build_upgrade_alert(analysis: TripAnalysis, upgrade: Upgrade) -> UpgradeAler
         f"{trip['origin']} > {trip['destination']}  {_dates(trip)}",
         f"{cabin.capitalize()} by cash is ${upgrade.outlook.cash:,} ({_fares_text(analysis)}), only "
         f"${upgrade.extra:,.0f} more than the cheapest way to fly ({over}, ${upgrade.over.best_cost:,.0f}).",
-        f"That is {upgrade.multiple:.2f}x; better cabins are flagged at {UPGRADE_MAX_MULTIPLE:g}x or less.",
+        f"That is {upgrade.multiple:.2f}x; your goal flags better cabins at "
+        f"{analysis.goals.upgrade_multiple:g}x or less.",
     ]
     if analysis.baseline.fetched_at:
         lines.append(f"Cash fares as of {analysis.baseline.fetched_at[:10]}. Verify the fare before booking.")
@@ -401,14 +416,19 @@ def build_upgrade_alert(analysis: TripAnalysis, upgrade: Upgrade) -> UpgradeAler
 def decide_upgrade_alert(
     conn: sqlite3.Connection, analyses: list[TripAnalysis], *, now: datetime | None = None
 ) -> UpgradeAlert | None:
-    """An alert when a better cabin's CASH fare is within `UPGRADE_MAX_MULTIPLE` of the cheapest way to
-    fly one trip (the trip's `analyses`, one per cabin). Cabins that are cheap because of an affordable
-    award already produce an award alert, so they are not repeated here. Only the best cabin is
-    reported, and not again within `RE_ALERT_DAYS` unless it got cheaper."""
+    """An alert when a better cabin's CASH fare is within the trip's upgrade multiple of economy (the trip's
+    `analyses`, one per cabin; `compare_cabins` applies the goals, so nothing is flagged when the upgrade
+    goal or its multiple is off, or above a set cabin max). Cabins that are cheap because of an affordable
+    award already produce an award alert, and a cash fare at or under the cabin's max already produces a
+    cash alert, so neither is repeated here. Only the best cabin is reported, and not again within
+    `RE_ALERT_DAYS` unless it got cheaper."""
     when = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     comparison = compare_cabins(analyses, when.date())
     by_cabin = {a.cabin: a for a in analyses}
-    cash_upgrades = [u for u in comparison.upgrades if u.outlook.best_way == "cash"]
+    cash_upgrades = [
+        u for u in comparison.upgrades
+        if u.outlook.best_way == "cash" and by_cabin[u.outlook.cabin].cabin_max is None
+    ]
     if not cash_upgrades:
         return None
     best = max(cash_upgrades, key=lambda u: list(by_cabin).index(u.outlook.cabin))

@@ -45,7 +45,7 @@ def test_trip_fields_are_normalized(conn):
 
 
 def test_a_trip_has_no_cabin_or_price_limit_columns(conn):
-    # Every trip is priced in every cabin, and cash targets (`trip target`) replaced the price limits.
+    # Every trip is priced in every cabin, and the per-cabin maxes on its goals (`trip goal`) replaced the price limits.
     new_trip(conn)
 
     columns = {row[1] for row in conn.execute("PRAGMA table_info(trips)")}

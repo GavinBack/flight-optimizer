@@ -261,20 +261,22 @@ def search_trip(
 ) -> TripSearchResult:
     options = dict(
         gateways=gateways, cabin=cabin, max_layover_days=max_layover_days,
-        sources=sources, min_seats=min_seats, window=window_days(trip),
+        sources=sources, min_seats=min_seats,
     )
 
     outbound_date = date.fromisoformat(trip["outbound_date"])  # the day to leave, or to land (see `windows.py`)
     arrival = is_arrival(trip)
+    outbound_window = window_days(trip, "outbound")
     outbound = search_one_way(
-        client, trip["origin"], trip["destination"], outbound_date, lands_on_date=arrival, **options
+        client, trip["origin"], trip["destination"], outbound_date, lands_on_date=arrival, window=outbound_window,
+        **options,
     )
-    windows = outbound_windows(outbound_date, window_days(trip)) if arrival else None
+    windows = outbound_windows(outbound_date, outbound_window) if arrival else None
     return_trip = None
     if trip["return_date"]:
         return_trip = search_one_way(
             client, trip["destination"], trip["origin"],
-            date.fromisoformat(trip["return_date"]), **options,
+            date.fromisoformat(trip["return_date"]), window=window_days(trip, "return"), **options,
         )
     return TripSearchResult(
         trip_id=trip["id"], outbound=outbound, return_trip=return_trip,

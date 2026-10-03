@@ -50,7 +50,8 @@ def test_a_trip_has_no_cabin_or_price_limit_columns(conn):
 
     columns = {row[1] for row in conn.execute("PRAGMA table_info(trips)")}
     assert not columns & {"cabin", "max_miles", "max_cash_price"}
-    assert {"name", "origin", "destination", "outbound_date", "return_date", "active", "flexible"} <= columns
+    assert {"name", "origin", "destination", "outbound_date", "return_date", "active", "outbound_flexible", "return_flexible",
+            "date_anchor"} <= columns
 
 
 def test_one_way_trip_has_no_return_date(conn):
@@ -188,7 +189,8 @@ def test_an_older_database_loses_the_retired_columns_and_keeps_its_trips(tmp_pat
     db.init_schema(conn)
 
     (row,) = conn.execute("SELECT * FROM trips").fetchall()
-    assert row["name"] == "Costa Rica" and row["active"] == 1 and row["flexible"] == 1 and row["outbound_date"] == "2027-01-09"
+    assert row["name"] == "Costa Rica" and row["active"] == 1 and (row["outbound_flexible"], row["return_flexible"]) == (1, 1)
+    assert "flexible" not in row.keys() and row["outbound_date"] == "2027-01-09"
     assert not {"cabin", "max_miles", "max_cash_price"} & set(row.keys())
 
 

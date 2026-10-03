@@ -27,9 +27,9 @@ def test_the_owners_window_is_three_days_either_side():
 
 
 def test_trips_are_exact_unless_marked_flexible(conn):
-    assert trip(conn)["flexible"] == 0 and window_days(trip(conn, name="X", outbound_date=date(2027, 2, 1))) == 0
-    flexible = trip(conn, name="Flex", outbound_date=date(2027, 3, 1), flexible=True)
-    assert flexible["flexible"] == 1 and window_days(flexible) == 3
+    assert trip(conn)["outbound_flexible"] == 0 and window_days(trip(conn, name="X", outbound_date=date(2027, 2, 1)), "outbound") == 0
+    flexible = trip(conn, name="Flex", outbound_date=date(2027, 3, 1), outbound_flexible=True, return_flexible=True)
+    assert window_days(flexible, "outbound") == 3 and window_days(flexible, "return") == 3
 
 
 def test_a_window_reaches_the_same_number_of_days_each_way():
@@ -52,8 +52,8 @@ def test_a_window_that_has_wholly_passed_is_nothing():
 
 def test_the_note_is_empty_for_exact_trips_and_states_the_window_for_flexible_ones(conn):
     assert window_note(trip(conn)) == ""
-    assert window_note(trip(conn, name="Flex", outbound_date=date(2027, 3, 1), flexible=True)) == " (flexible: +/-3 days)"
-    assert window_note(trip(conn, name="Arrive", outbound_date=date(2027, 4, 1), flexible=True, date_anchor="arrive")) == (
+    assert window_note(trip(conn, name="Flex", outbound_date=date(2027, 3, 1), outbound_flexible=True, return_flexible=True)) == " (flexible: +/-3 days)"
+    assert window_note(trip(conn, name="Arrive", outbound_date=date(2027, 4, 1), outbound_flexible=True, return_flexible=True, date_anchor="arrive")) == (
         " (flexible: +/-3 days)"
     )
 
@@ -85,7 +85,7 @@ def test_an_existing_database_gets_the_column_without_losing_trips(tmp_path):
     db.init_schema(conn)   # safe to run again
 
     (row,) = conn.execute("SELECT * FROM trips").fetchall()
-    assert row["name"] == "Costa Rica" and row["active"] == 1 and row["flexible"] == 0
+    assert row["name"] == "Costa Rica" and row["active"] == 1 and row["outbound_flexible"] == 0
     # saved when every outbound date meant the day to land: it keeps that meaning
     assert row["date_anchor"] == "arrive"
     assert row["outbound_date"] == "2027-01-09" and "depart_date" not in row.keys()  # the column was renamed
@@ -132,18 +132,18 @@ def test_the_column_only_accepts_zero_or_one(conn):
 
     trip(conn)
     with pytest.raises(sqlite3.IntegrityError):
-        conn.execute("UPDATE trips SET flexible = 2")
+        conn.execute("UPDATE trips SET outbound_flexible = 2")
 
 
 def test_update_can_switch_a_trip_between_exact_and_flexible_and_leaves_it_alone_otherwise(conn):
     row = trip(conn)
 
-    db.update_trip(conn, row["id"], flexible=True)
-    assert conn.execute("SELECT flexible FROM trips").fetchone()[0] == 1
+    db.update_trip(conn, row["id"], outbound_flexible=True, return_flexible=True)
+    assert tuple(conn.execute("SELECT outbound_flexible, return_flexible FROM trips").fetchone()) == (1, 1)
     db.update_trip(conn, row["id"], name="Renamed")
-    assert conn.execute("SELECT flexible FROM trips").fetchone()[0] == 1
-    db.update_trip(conn, row["id"], flexible=False)
-    assert conn.execute("SELECT flexible FROM trips").fetchone()[0] == 0
+    assert tuple(conn.execute("SELECT outbound_flexible, return_flexible FROM trips").fetchone()) == (1, 1)
+    db.update_trip(conn, row["id"], outbound_flexible=False, return_flexible=False)
+    assert tuple(conn.execute("SELECT outbound_flexible, return_flexible FROM trips").fetchone()) == (0, 0)
 
 
 def test_a_flexible_arrival_date_lands_three_days_either_side():
@@ -161,3 +161,19 @@ def test_an_exact_arrival_may_still_leave_the_day_before():
     assert outbound_windows(date(2027, 1, 9), 0, today=date(2026, 9, 22)) == (
         (date(2027, 1, 8), date(2027, 1, 9)), (date(2027, 1, 9), date(2027, 1, 9)),
     )
+
+
+def test_the_note_and_label_say_which_date_is_flexible(conn):
+    from flight_optimizer.windows import flexibility_label
+
+    out = trip(conn, name="Out", outbound_flexible=True)
+    back = trip(conn, name="Back", outbound_date=date(2027, 5, 1), return_date=date(2027, 5, 8), return_flexible=True)
+    both = trip(conn, name="Both", outbound_date=date(2027, 6, 1), return_date=date(2027, 6, 8),
+                outbound_flexible=True, return_flexible=True)
+
+    assert window_note(out) == " (flexible: outbound +/-3 days, return exact)"
+    assert window_note(back) == " (flexible: return +/-3 days, outbound exact)"
+    assert window_note(both) == " (flexible: +/-3 days)"
+    assert [flexibility_label(t) for t in (trip(conn, name="None", outbound_date=date(2027, 7, 1)), out, back, both)] == [
+        "exact", "out +/-3", "ret +/-3", "+/-3 days",
+    ]

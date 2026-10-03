@@ -21,6 +21,7 @@ from flight_optimizer.alerts import RE_ALERT_DAYS, _dates, _parse_time
 from flight_optimizer.analysis import TripAnalysis
 from flight_optimizer.cabins import cabin_label
 from flight_optimizer.seats_aero import Cabin
+from flight_optimizer.windows import any_flexible
 
 DROP_PERCENT = 10
 DROP_DOLLARS = 50
@@ -76,7 +77,7 @@ def build_cash_alert(analysis: TripAnalysis, kind: str) -> CashAlert:
             f"Typical lately: ${trend.typical:,} (median of {trend.count} search{'es' if trend.count != 1 else ''}{since}); "
             f"lowest before: ${trend.low:,}."
         )
-    if trip["flexible"]:
+    if any_flexible(trip):
         lines.append("This fare is for your exact dates; flexible dates apply to awards only.")
     if baseline.cabin_fetched_at:
         lines.append(f"Cash fares as of {baseline.cabin_fetched_at[:10]}. Fares change fast: verify before booking.")

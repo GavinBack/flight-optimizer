@@ -324,7 +324,7 @@ def test_without_advice_the_digest_has_no_such_line(conn):
 
 
 def test_a_flexible_trip_says_so_in_the_digest_header(conn):
-    trip = add_trip(conn, flexible=True)
+    trip = add_trip(conn, outbound_flexible=True, return_flexible=True)
 
     lines = trip_section([analysis_for(trip, [affordable()])], {}, {}, TODAY)
 

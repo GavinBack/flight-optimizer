@@ -158,12 +158,18 @@ def test_an_empty_list_says_how_to_add_one(conn):
 
 
 def test_a_trip_is_exact_unless_saved_flexible(conn):
-    assert row(conn, kelowna(conn))["flexible"] == 0
-    assert row(conn, kelowna(conn, outbound_date=date(2027, 2, 1), return_date=date(2027, 2, 5), flexible=True))["flexible"] == 1
+    assert row(conn, kelowna(conn))["outbound_flexible"] == 0
+    saved = row(conn, kelowna(conn, outbound_date=date(2027, 2, 1), return_date=date(2027, 2, 5), return_flexible=True))
+    assert (saved["outbound_flexible"], saved["return_flexible"]) == (0, 1)  # each date on its own
+
+
+def test_a_one_way_trip_cannot_have_a_flexible_return(conn):
+    with pytest.raises(ValueError, match="no return date to make flexible"):
+        kelowna(conn, return_date=None, return_flexible=True)
 
 
 def test_the_listing_marks_flexible_trips(conn):
-    kelowna(conn, flexible=True)
+    kelowna(conn, outbound_flexible=True, return_flexible=True)
     kelowna(conn, name="Exact", outbound_date=date(2027, 3, 1), return_date=None)
 
     lines = format_trips(conn).splitlines()

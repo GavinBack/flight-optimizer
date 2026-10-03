@@ -411,7 +411,7 @@ def _searched(conn, **fields):
     return client.calls
 
 
-FLEX = dict(name="Flex", outbound_date=date(2027, 2, 1), return_date=date(2027, 2, 8), flexible=True)
+FLEX = dict(name="Flex", outbound_date=date(2027, 2, 1), return_date=date(2027, 2, 8), outbound_flexible=True, return_flexible=True)
 
 
 def test_search_trip_widens_only_flexible_trips(conn):
@@ -471,3 +471,13 @@ def test_search_trip_records_the_landing_days_and_leaves_the_return_alone(conn):
     assert result.outbound_lands == (JAN9, JAN9)
     # the return still leaves on its date, with a connection allowed the next day
     assert ("SJO", "RNO", JAN16, JAN16) in client.calls and ("SJO", "LAX", JAN16, JAN16) in client.calls
+
+
+def test_each_date_is_widened_on_its_own(conn):
+    only_out = _searched(conn, name="Out", outbound_date=date(2027, 2, 1), return_date=date(2027, 2, 8),
+                         outbound_flexible=True)
+    only_back = _searched(conn, name="Back", outbound_date=date(2027, 3, 1), return_date=date(2027, 3, 8),
+                          return_flexible=True)
+
+    assert only_out == [("RNO", "SJO", date(2027, 1, 29), date(2027, 2, 4)), ("SJO", "RNO", date(2027, 2, 8), date(2027, 2, 8))]
+    assert only_back == [("RNO", "SJO", date(2027, 3, 1), date(2027, 3, 1)), ("SJO", "RNO", date(2027, 3, 5), date(2027, 3, 11))]

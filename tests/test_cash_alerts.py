@@ -32,7 +32,7 @@ def trend(current, previous):
 
 
 def cash_analysis(conn, total, previous=(), *, cabin=Cabin.ECONOMY, target=None, trip=None, flexible=False, fetched="2026-09-21T06:00:00Z"):
-    trip = trip or add_trip(conn, flexible=flexible)
+    trip = trip or add_trip(conn, outbound_flexible=flexible, return_flexible=flexible)
     out, back = total // 2, total - total // 2
     base = TripBaseline(cabin_fares=(fare(out), fare(back)), economy_fares=(fare(out), fare(back)),
                         fetched_at=fetched, cabin_fetched_at=fetched)
@@ -98,7 +98,7 @@ def test_moving_a_trips_dates_clears_its_history_but_a_rename_does_not(conn):
     trip = add_trip(conn)
     db.record_cash_total(conn, trip["id"], "economy", stamp(3), 700)
 
-    db.update_trip(conn, trip["id"], name="Renamed", flexible=True)
+    db.update_trip(conn, trip["id"], name="Renamed", outbound_flexible=True, return_flexible=True)
     assert conn.execute("SELECT COUNT(*) FROM cash_history").fetchone()[0] == 1
 
     db.update_trip(conn, trip["id"], outbound_date=date(2027, 1, 10))

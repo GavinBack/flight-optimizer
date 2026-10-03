@@ -587,7 +587,7 @@ def shifted(out_day, back_day):
 
 def test_an_alert_for_shifted_dates_says_which_and_what_was_asked_for(conn):
     from datetime import date
-    trip = add_trip(conn, flexible=True)
+    trip = add_trip(conn, outbound_flexible=True, return_flexible=True)
     analysis = analysis_for(trip, [shifted(date(2027, 1, 7), date(2027, 1, 14))])
 
     alert = decide_alert(conn, analysis)
@@ -596,7 +596,7 @@ def test_an_alert_for_shifted_dates_says_which_and_what_was_asked_for(conn):
 
 
 def test_an_alert_on_the_asked_for_dates_does_not_mention_them_twice(conn):
-    trip = add_trip(conn, flexible=True)
+    trip = add_trip(conn, outbound_flexible=True, return_flexible=True)
     analysis = analysis_for(trip, [shifted(JAN9, JAN16)])
 
     assert decide_alert(conn, analysis).message.split("\n")[0] == "RNO > SJO  Jan 09 - Jan 16  (business)"

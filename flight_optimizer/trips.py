@@ -33,7 +33,8 @@ def add_trip(
     return_date: date | None = None,
     gateways: list[str] | tuple[str, ...] = (),
     active: bool = True,
-    flexible: bool = False,
+    outbound_flexible: bool = False,
+    return_flexible: bool = False,
     date_anchor: str = "depart",
 ) -> int:
     """Validate everything first, then save the trip and its gateways together."""
@@ -44,6 +45,8 @@ def add_trip(
         raise ValueError("The origin and destination are the same airport.")
     if return_date is not None and return_date < outbound_date:
         raise ValueError("The return date is before the outbound date.")
+    if return_flexible and return_date is None:
+        raise ValueError("A one-way trip has no return date to make flexible.")
     hubs = list(dict.fromkeys(airport(g) for g in gateways))
     for hub in hubs:
         if hub in (origin, destination):
@@ -58,7 +61,8 @@ def add_trip(
 
     trip_id = db.add_trip(
         conn, name=name.strip(), origin=origin, destination=destination, outbound_date=outbound_date,
-        return_date=return_date, active=active, flexible=flexible, date_anchor=date_anchor,
+        return_date=return_date, active=active, outbound_flexible=outbound_flexible,
+        return_flexible=return_flexible, date_anchor=date_anchor,
     )
     if hubs:
         db.set_gateways(conn, trip_id, hubs)

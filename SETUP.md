@@ -123,7 +123,7 @@ python -m flight_optimizer trip add "Costa Rica" RNO SJO --depart 2027-01-09 --r
 
 - Dates are year-month-day and are the days the flights leave. If you must arrive by a certain day instead, use `--arrive` in place of `--depart`. Leave out `--return` for a one-way trip.
 - `--gateways` lists hub airports to route through. Seats.aero only knows airport pairs that airlines publish, so a small airport often has no direct award route. Routing RNO to LAX, then LAX to SJO, finds options a direct search misses. Each extra hub adds Seats.aero calls, so start with one or two big hubs near your origin.
-- Add `--flexible` to also search 3 days either side of each date.
+- Each date is exact by default. Add `--flexible` to also search 3 days either side of both dates, or `--flexible-outbound` / `--flexible-return` for just one.
 - Trips start active, so the app searches and alerts on them straight away. Add `--inactive` to save one without that.
 
 **Enter your miles balances.** The app uses these to decide what you can afford. Every program starts at 0. Give a program name and a number, and repeat for as many programs as you hold. Programs you leave out stay as they are:

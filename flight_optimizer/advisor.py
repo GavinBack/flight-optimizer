@@ -70,8 +70,10 @@ exchange rates (a + after a tax amount means some could not be converted): treat
 leaves on R (the default). "arrive D, return R": the outbound must land on D and may leave up to \
 {EARLY_DEPARTURE_DAYS} day earlier (options show "(leave ...)" when they do); the return leaves on R. Cash fares are \
 always for flights leaving on the trip's own dates.
-- A flexible trip widens the award search by {FLEXIBLE_WINDOW_DAYS} days either side of each date (for an arrival \
-date, the day the outbound lands). So an option may be on shifted dates (each option shows its dates). Cash fares are only for the exact requested dates, so compare a shifted \
+- Each date is exact unless the trip's header says it is flexible; a flexible date widens the award search by \
+{FLEXIBLE_WINDOW_DAYS} days either side of it (for an arrival date, the day the outbound lands). The two dates are \
+independent, so one may be flexible and the other exact. An option may then be on shifted dates (each option \
+shows its dates). Cash fares are only for the exact requested dates, so compare a shifted \
 award with the cash fare cautiously and say so. Note which shifted dates you would be committing to.
 
 How to work:
@@ -330,7 +332,8 @@ def fingerprint(
             [
                 {
                     "trip": [a.trip["id"], a.trip["origin"], a.trip["destination"], a.trip["outbound_date"],
-                             a.trip["return_date"], bool(a.trip["flexible"]), a.trip["date_anchor"]],
+                             a.trip["return_date"], bool(a.trip["outbound_flexible"]), bool(a.trip["return_flexible"]),
+                             a.trip["date_anchor"]],
                     "cabin": a.cabin.name,
                     "cash": None if a.baseline is None else [cash(a.baseline.cabin_total), cash(a.baseline.economy_total)],
                     "target": a.cash_target,

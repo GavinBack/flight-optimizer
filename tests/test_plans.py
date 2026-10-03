@@ -293,7 +293,7 @@ def test_a_plan_for_shifted_dates_shows_the_dates_to_book_and_what_was_asked(con
     from datetime import date
     from builders import leg, option
 
-    trip = add_trip(conn, flexible=True)
+    trip = add_trip(conn, outbound_flexible=True, return_flexible=True)
     shifted = option(
         [leg("RNO", "LAX", "delta", 10_900, date(2027, 1, 7)), leg("LAX", "SJO", "aeroplan", 25_000, date(2027, 1, 7))],
         [leg("SJO", "LAX", "aeroplan", 25_000, date(2027, 1, 14)), leg("LAX", "RNO", "delta", 10_900, date(2027, 1, 14))],

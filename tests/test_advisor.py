@@ -308,7 +308,7 @@ def test_the_day_of_a_saved_answer_comes_from_its_file_name(tmp_path):
 def test_switching_a_trip_to_flexible_asks_again_and_the_prompt_explains_it(conn):
     exact = situation(conn)
     before = print_of(exact)
-    db.update_trip(conn, exact[0].trip["id"], flexible=True)
+    db.update_trip(conn, exact[0].trip["id"], outbound_flexible=True, return_flexible=True)
     flexible = situation(conn)
 
     assert print_of(flexible) != before

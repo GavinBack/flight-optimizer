@@ -136,7 +136,7 @@ python -m flight_optimizer trip add "Costa Rica" RNO SJO --depart 2027-01-09 --r
 - `--return` is the day the flight home **leaves**.
 - Leave out `--return` for a one-way trip.
 - `--gateways` lists the hub airports to route through. Many small airports have no direct award route, so the app searches through big hubs instead (for example RNO to LAX, then LAX to SJO).
-- `--flexible` searches awards up to 3 days either side of each date. With `--arrive`, that is the day the flight there lands. Every option includes at least one night at your destination: the flight home never leaves on the day you land. Cash prices are always checked only for flights leaving on your exact dates.
+- Each date is exact unless you say otherwise. `--flexible` searches awards up to 3 days either side of both dates; `--flexible-outbound` or `--flexible-return` does it for just one. With `--arrive`, the outbound window is around the day the flight there lands. Every option includes at least one night at your destination: the flight home never leaves on the day you land. Cash prices are always checked only for flights leaving on your exact dates.
 - `--inactive` saves the trip without searching it yet.
 
 A new trip starts searching at the next report or daily check.
@@ -153,7 +153,7 @@ You can change these:
 
 - `--name` renames the trip.
 - `--depart` and `--return` change the dates. `--arrive` changes the outbound date and makes it an arrival date; `--depart` makes it a departure date again. `--one-way` drops the return leg. Changing a date clears the saved cash price history for that trip (switching between `--depart` and `--arrive` on the same date does not).
-- `--flexible` or `--exact` turns the 3-day windows on or off.
+- `--flexible` or `--exact` turns the 3-day windows on or off for both dates. `--flexible-outbound` / `--exact-outbound` and `--flexible-return` / `--exact-return` change one date only.
 - `--active` or `--inactive` starts or stops searching and alerts. An inactive trip sends no alerts at all, however good the deal.
 
 ### Set a cash price target

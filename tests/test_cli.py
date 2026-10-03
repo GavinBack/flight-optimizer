@@ -1617,8 +1617,8 @@ def test_trip_add_can_be_flexible_and_says_so(env, capsys):
     run(["trip", "add", "Kelowna", "RNO", "YLW", "--depart", "2026-12-22", "--return", "2026-12-28", "--flexible"], tmp_path)
 
     out = capsys.readouterr().out
-    assert "Flexible: awards are searched 3 days either side of each date." in out
-    assert trip_rows(conn)[1]["flexible"] == 1
+    assert "Outbound: flexible, 3 days either side. Return: flexible, 3 days either side." in out
+    assert (trip_rows(conn)[1]["outbound_flexible"], trip_rows(conn)[1]["return_flexible"]) == (1, 1)
 
 
 def test_trips_are_exact_by_default(env, capsys):
@@ -1626,16 +1626,16 @@ def test_trips_are_exact_by_default(env, capsys):
 
     run(["trip", "add", "Kelowna", "RNO", "YLW", "--depart", "2026-12-22"], tmp_path)
 
-    assert "Exact departure dates." in capsys.readouterr().out and trip_rows(conn)[1]["flexible"] == 0
+    assert "Outbound: exact departure date." in capsys.readouterr().out and (trip_rows(conn)[1]["outbound_flexible"], trip_rows(conn)[1]["return_flexible"]) == (0, 0)
 
 
 def test_trip_set_switches_between_flexible_and_exact(env):
     conn, tmp_path = env
 
     run(["trip", "set", "1", "--flexible"], tmp_path)
-    assert trip_rows(conn)[0]["flexible"] == 1
+    assert (trip_rows(conn)[0]["outbound_flexible"], trip_rows(conn)[0]["return_flexible"]) == (1, 1)
     run(["trip", "set", "1", "--exact"], tmp_path)
-    assert trip_rows(conn)[0]["flexible"] == 0
+    assert (trip_rows(conn)[0]["outbound_flexible"], trip_rows(conn)[0]["return_flexible"]) == (0, 0)
 
 
 def test_flexible_and_exact_cannot_both_be_given(env):
@@ -2100,9 +2100,9 @@ def test_trip_add_with_arrive_saves_an_arrival_date_and_explains_it(env, capsys)
 
     row = trip_rows(conn)[1]
     out = capsys.readouterr().out
-    assert row["date_anchor"] == "arrive" and row["outbound_date"] == "2026-12-22" and row["flexible"] == 1
+    assert row["date_anchor"] == "arrive" and row["outbound_date"] == "2026-12-22" and (row["outbound_flexible"], row["return_flexible"]) == (1, 1)
     assert "arrive Dec 22 2026, return Dec 28 2026" in out
-    assert "must land on it and may leave up to 1 day earlier" in out and "land up to 3 days either side of the arrival date" in out
+    assert "must land on it and may leave up to 1 day earlier" in out and "(flexible: it may land 3 days either side)" in out
 
 
 def test_trip_add_needs_exactly_one_of_depart_or_arrive(env, capsys):
@@ -2127,3 +2127,36 @@ def test_trip_set_arrive_or_depart_changes_the_anchor_and_keeps_cash_history_on_
     assert row["date_anchor"] == "depart" and row["outbound_date"] == "2027-01-10"
     assert conn.execute("SELECT COUNT(*) FROM cash_history").fetchone()[0] == 0
     capsys.readouterr()
+
+
+# --- each date flexible on its own -----------------------------------------------------------------------------
+
+def test_trip_add_can_make_just_one_date_flexible(env, capsys):
+    conn, tmp_path = env
+
+    run(["trip", "add", "Kelowna", "RNO", "YLW", "--depart", "2026-12-22", "--return", "2026-12-28",
+         "--flexible-return"], tmp_path)
+
+    row = trip_rows(conn)[1]
+    assert (row["outbound_flexible"], row["return_flexible"]) == (0, 1)
+    assert "Outbound: exact departure date. Return: flexible, 3 days either side." in capsys.readouterr().out
+
+
+def test_trip_set_changes_each_date_on_its_own(env, capsys):
+    conn, tmp_path = env
+
+    run(["trip", "set", "1", "--flexible-outbound"], tmp_path)
+    assert (trip_rows(conn)[0]["outbound_flexible"], trip_rows(conn)[0]["return_flexible"]) == (1, 0)
+    run(["trip", "set", "1", "--flexible"], tmp_path)
+    run(["trip", "set", "1", "--exact-outbound"], tmp_path)
+    assert (trip_rows(conn)[0]["outbound_flexible"], trip_rows(conn)[0]["return_flexible"]) == (0, 1)
+    capsys.readouterr()
+
+
+def test_asking_one_date_to_be_both_flexible_and_exact_is_refused(env, capsys):
+    conn, tmp_path = env
+
+    code, _, _ = run(["trip", "set", "1", "--flexible", "--exact-return"], tmp_path)
+
+    assert code != 0 and "both flexible and exact" in capsys.readouterr().err
+    assert (trip_rows(conn)[0]["outbound_flexible"], trip_rows(conn)[0]["return_flexible"]) == (0, 0)

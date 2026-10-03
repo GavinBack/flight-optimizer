@@ -7,10 +7,10 @@ outbound must land on that day and may leave up to `EARLY_DEPARTURE_DAYS` before
 overnight flight the day before counts; landing on an earlier day does not). The return date is always
 the day to leave.
 
-A trip is either exact (the default) or flexible, which widens the award search by `FLEXIBLE_WINDOW_DAYS`
-either side of each date (owner's rule, 2026-10-03): with a departure anchor the days the flights leave,
-with an arrival anchor the days the outbound lands (and the return leaves). Cash fares always search
-departures on the trip's exact dates.
+Each date is exact by default: the owner wants to fly on that day. Either date can be made flexible on its
+own (owner's rule, 2026-10-03), which widens the award search by `FLEXIBLE_WINDOW_DAYS` either side of it:
+for the outbound, the days it leaves (or with an arrival anchor, lands); for the return, the days it leaves.
+Cash fares always search departures on the trip's exact dates.
 """
 
 import sqlite3
@@ -21,9 +21,20 @@ EARLY_DEPARTURE_DAYS = 1  # owner's rule: the outbound may leave this many days 
 MIN_STAY_NIGHTS = 1  # owner's rule (2026-10-03): the return leaves at least this many days after the outbound lands
 
 
-def window_days(trip: sqlite3.Row) -> int:
-    """0 for an exact trip, otherwise the days either side to search."""
-    return FLEXIBLE_WINDOW_DAYS if trip["flexible"] else 0
+def window_days(trip: sqlite3.Row, direction: str) -> int:
+    """Days either side of the "outbound" or "return" date to search: 0 when that date is exact."""
+    if direction not in ("outbound", "return"):
+        raise ValueError(f"direction must be 'outbound' or 'return', not {direction!r}")
+    return FLEXIBLE_WINDOW_DAYS if trip[f"{direction}_flexible"] else 0
+
+
+def any_flexible(trip: sqlite3.Row) -> bool:
+    """True when either date is flexible, so options may be on days other than the ones asked."""
+    return bool(trip["outbound_flexible"] or (trip["return_date"] and trip["return_flexible"]))
+
+
+def _flexible_dates(trip: sqlite3.Row) -> tuple[bool, bool]:
+    return bool(trip["outbound_flexible"]), bool(trip["return_date"] and trip["return_flexible"])
 
 
 def date_window(on: date, days: int, today: date | None = None) -> tuple[date, date] | None:
@@ -56,12 +67,26 @@ def is_arrival(trip: sqlite3.Row) -> bool:
 
 def window_note(trip: sqlite3.Row) -> str:
     """Text to put after a trip's dates: nothing for an exact trip."""
-    return f" (flexible: +/-{FLEXIBLE_WINDOW_DAYS} days)" if trip["flexible"] else ""
+    outbound, back = _flexible_dates(trip)
+    if outbound and back:
+        return f" (flexible: +/-{FLEXIBLE_WINDOW_DAYS} days)"
+    if outbound:
+        return f" (flexible: outbound +/-{FLEXIBLE_WINDOW_DAYS} days, return exact)"
+    if back:
+        return f" (flexible: return +/-{FLEXIBLE_WINDOW_DAYS} days, outbound exact)"
+    return ""
 
 
 def flexibility_label(trip: sqlite3.Row) -> str:
-    """A short label for a list column: "exact" or "+/-3 days"."""
-    return f"+/-{FLEXIBLE_WINDOW_DAYS} days" if trip["flexible"] else "exact"
+    """A short label for a list column: "exact", "+/-3 days" (both dates), "out +/-3" or "ret +/-3"."""
+    outbound, back = _flexible_dates(trip)
+    if outbound and back:
+        return f"+/-{FLEXIBLE_WINDOW_DAYS} days"
+    if outbound:
+        return f"out +/-{FLEXIBLE_WINDOW_DAYS}"
+    if back:
+        return f"ret +/-{FLEXIBLE_WINDOW_DAYS}"
+    return "exact"
 
 
 def trip_dates(trip: sqlite3.Row, fmt: str = "%b %d %Y") -> str:

@@ -28,7 +28,7 @@ from flight_optimizer.promos import Promo, active_promos, best_promos
 from flight_optimizer.savings import TripBaseline, estimate_value
 from flight_optimizer.taxes import option_taxes, rates_note
 from flight_optimizer.seats_aero import AwardResult, Cabin, SeatsAeroClient
-from flight_optimizer.windows import EARLY_DEPARTURE_DAYS, is_arrival, option_dates, trip_dates, window_note
+from flight_optimizer.windows import EARLY_DEPARTURE_DAYS, any_flexible, is_arrival, option_dates, trip_dates, window_note
 
 RULE = "=" * 78
 
@@ -389,7 +389,7 @@ def render_comparison(comparison: CabinComparison) -> str:
         " Only awards you can afford on non-stale data count."
     )
     out.append("  Miles and status earned by a better cabin are not counted, so real upgrades cost less than shown.")
-    if trip["flexible"]:
+    if any_flexible(trip):
         out.append(
             "  Flexible dates: awards may be on shifted dates, but cash fares are for your exact dates only "
             "(pricing every day would multiply the SerpApi searches)."
@@ -433,7 +433,7 @@ def render_trip(
             f"  Cash fares leave on the day you want to arrive; awards may also leave up to {EARLY_DEPARTURE_DAYS} day"
             f"{'s' if EARLY_DEPARTURE_DAYS != 1 else ''} earlier."
         )
-    if trip["flexible"]:
+    if any_flexible(trip):
         out.append("  Cash fares are for your exact dates. Flexible dates apply to awards only.")
     if baseline is None:
         out.append(f"  {cash_note or 'Cash prices unavailable.'}")
@@ -482,7 +482,7 @@ def render_trip(
         taxes = option_taxes(option)
         if taxes.usd or not taxes.complete:
             head += f" + {taxes.text}"
-        if trip["flexible"]:
+        if any_flexible(trip):
             head += f"   {_option_dates(option, trip)}"
         if baseline is not None:
             value = estimate_value(option, baseline)

@@ -703,7 +703,7 @@ def shifted_option(out_day, back_day, miles=25_000):
 
 
 def render_flexible(conn, ranked, **kwargs):
-    trip = add_trip(conn, flexible=True)
+    trip = add_trip(conn, outbound_flexible=True, return_flexible=True)
     return render_trip(trip, ["LAX"], ranked, BASELINE, BALANCES, today=TODAY, **kwargs)
 
 
@@ -749,7 +749,7 @@ def test_the_cabin_comparison_warns_that_awards_and_cash_may_be_on_different_dat
     from flight_optimizer.report import render_comparison
     from builders import analysis_for as build_analysis
 
-    trip = add_trip(conn, flexible=True)
+    trip = add_trip(conn, outbound_flexible=True, return_flexible=True)
     text = render_comparison(compare_cabins([build_analysis(trip, [], cabin=Cabin.BUSINESS)], TODAY))
 
     assert "cash fares are for your exact dates only" in text

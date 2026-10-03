@@ -20,7 +20,7 @@ from flight_optimizer.promos import Promo
 from flight_optimizer.report import miss_text
 from flight_optimizer.savings import estimate_value
 from flight_optimizer.taxes import option_taxes
-from flight_optimizer.windows import window_note
+from flight_optimizer.windows import trip_dates, window_note
 
 DIGEST_INTERVAL = timedelta(days=7)
 _META_KEY = "digest:last_sent"
@@ -53,11 +53,7 @@ def _days(n: int) -> str:
 
 
 def _dates(trip: sqlite3.Row) -> str:
-    depart = date.fromisoformat(trip["depart_date"])
-    text = f"{depart:%b %d}"
-    if trip["return_date"]:
-        text += f" - {date.fromisoformat(trip['return_date']):%b %d}"
-    return text
+    return trip_dates(trip, "%b %d")
 
 
 def _alert_line(counts: dict[str, int]) -> str:

@@ -184,7 +184,7 @@ def conn():
 def add_trip(conn, **overrides):
     fields = dict(
         name="Costa Rica", origin="RNO", destination="SJO",
-        depart_date=JAN9, return_date=JAN16, active=True,
+        outbound_date=JAN9, return_date=JAN16, active=True,
     )
     return db.add_trip(conn, **{**fields, **overrides})
 
@@ -404,20 +404,32 @@ def test_a_trip_whose_dates_have_passed_searches_nothing():
     assert client.calls == []
 
 
+def _searched(conn, **fields):
+    trip = conn.execute("SELECT * FROM trips WHERE id = ?", (add_trip(conn, **fields),)).fetchone()
+    client = RangeClient({})
+    search_trip(client, trip, [], cabin=Cabin.BUSINESS)
+    return client.calls
+
+
+FLEX = dict(name="Flex", outbound_date=date(2027, 2, 1), return_date=date(2027, 2, 8), flexible=True)
+
+
 def test_search_trip_widens_only_flexible_trips(conn):
-    exact_trip = conn.execute("SELECT * FROM trips WHERE id = ?", (add_trip(conn),)).fetchone()
-    flexible_trip = conn.execute(
-        "SELECT * FROM trips WHERE id = ?", (add_trip(conn, name="Flex", depart_date=date(2027, 2, 1), return_date=date(2027, 2, 8), flexible=True),)
-    ).fetchone()
-    exact_client, flexible_client = RangeClient({}), RangeClient({})
+    # the default: both dates are the days to leave
+    assert _searched(conn) == [("RNO", "SJO", JAN9, JAN9), ("SJO", "RNO", JAN16, JAN16)]
+    assert _searched(conn, **FLEX) == [
+        ("RNO", "SJO", date(2027, 1, 29), date(2027, 2, 4)), ("SJO", "RNO", date(2027, 2, 5), date(2027, 2, 11)),
+    ]
 
-    search_trip(exact_client, exact_trip, [], cabin=Cabin.BUSINESS)
-    search_trip(flexible_client, flexible_trip, [], cabin=Cabin.BUSINESS)
 
-    # The outbound date is the day to land, so the search starts a day earlier; the return is unchanged.
-    assert exact_client.calls == [("RNO", "SJO", date(2027, 1, 8), JAN9), ("SJO", "RNO", JAN16, JAN16)]
-    assert flexible_client.calls == [
-        ("RNO", "SJO", date(2027, 1, 28), date(2027, 2, 1)), ("SJO", "RNO", date(2027, 2, 5), date(2027, 2, 11)),
+def test_an_arrival_date_searches_from_the_day_before_and_flexible_widens_either_side(conn):
+    # the outbound date is the day to land, so the search starts a day earlier; the return is unchanged
+    assert _searched(conn, name="Arr", date_anchor="arrive") == [
+        ("RNO", "SJO", date(2027, 1, 8), JAN9), ("SJO", "RNO", JAN16, JAN16),
+    ]
+    # lands Jan 29 to Feb 4, so leaves from Jan 28
+    assert _searched(conn, **{**FLEX, "name": "ArrFlex"}, date_anchor="arrive") == [
+        ("RNO", "SJO", date(2027, 1, 28), date(2027, 2, 4)), ("SJO", "RNO", date(2027, 2, 5), date(2027, 2, 11)),
     ]
 
 
@@ -440,8 +452,18 @@ def test_an_outbound_may_leave_the_day_before_it_lands_but_never_after(conn):
     assert ("LAX", "SJO", JAN8, JAN9) in client.calls  # no search past the landing day
 
 
-def test_search_trip_records_the_landing_days_and_leaves_the_return_alone(conn):
+def test_a_departure_dated_trip_has_no_landing_days_and_may_connect_the_next_day(conn):
     trip = conn.execute("SELECT * FROM trips WHERE id = ?", (add_trip(conn),)).fetchone()
+    client = RangeClient({("RNO", "LAX"): [award("RNO", "LAX", JAN9, 5_000)]})
+
+    result = search_trip(client, trip, ["LAX"], cabin=Cabin.BUSINESS)
+
+    assert result.outbound_lands is None
+    assert ("LAX", "SJO", JAN9, JAN10) in client.calls  # the hub leg may leave the next day
+
+
+def test_search_trip_records_the_landing_days_and_leaves_the_return_alone(conn):
+    trip = conn.execute("SELECT * FROM trips WHERE id = ?", (add_trip(conn, date_anchor="arrive"),)).fetchone()
     client = RangeClient({})
 
     result = search_trip(client, trip, ["LAX"], cabin=Cabin.BUSINESS)

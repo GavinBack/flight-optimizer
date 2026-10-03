@@ -20,8 +20,8 @@ def conn():
     connection.close()
 
 
-def plan_for(conn, options=None, promos=None, **kwargs):
-    trip = add_trip(conn)
+def plan_for(conn, options=None, promos=None, *, date_anchor="depart", **kwargs):
+    trip = add_trip(conn, date_anchor=date_anchor)
     analysis = analysis_for(trip, options or [good_option(seats=2)], **kwargs)
     return trip, render_plan(
         analysis, analysis.affordable[0], balances=BALANCES, generated_at=GENERATED, promos=promos
@@ -439,7 +439,7 @@ def test_the_columns_line_up_whatever_the_longest_label(conn):
     assert all(line[column - 4:column].replace(".", "").strip().isdigit() for line in lines)
 
 
-def test_an_exact_trip_leaving_the_day_before_is_not_labelled_flexible(conn):
+def test_an_exact_arrival_dated_trip_leaving_the_day_before_is_not_labelled_flexible(conn):
     early = option(
         [leg("RNO", "LAX", "delta", 5_000, JAN9 - timedelta(days=1),
              departs=datetime(2027, 1, 8, 18, 0), arrives=datetime(2027, 1, 8, 20, 0)),
@@ -447,8 +447,22 @@ def test_an_exact_trip_leaving_the_day_before_is_not_labelled_flexible(conn):
         [leg("SJO", "LAX", "aeroplan", 25_000, JAN16), leg("LAX", "RNO", "delta", 5_000, JAN16)],
     )
 
-    _, text = plan_for(conn, [early])
+    _, text = plan_for(conn, [early], date_anchor="arrive")
 
     head = text.splitlines()[0]
     assert "Jan 09 2027 (leave Jan 08 2027) - Jan 16 2027" in head
     assert "you asked" not in head and "flexible" not in head
+
+
+def test_on_a_departure_dated_trip_a_flight_landing_the_next_day_is_on_the_asked_dates(conn):
+    overnight = option(
+        [leg("RNO", "LAX", "delta", 5_000, JAN9, departs=datetime(2027, 1, 9, 18, 0), arrives=datetime(2027, 1, 9, 20, 0)),
+         leg("LAX", "SJO", "aeroplan", 25_000, JAN9 + timedelta(days=1),
+             departs=datetime(2027, 1, 10, 0, 30), arrives=datetime(2027, 1, 10, 7, 0))],
+        [leg("SJO", "LAX", "aeroplan", 25_000, JAN16), leg("LAX", "RNO", "delta", 5_000, JAN16)],
+    )
+
+    _, text = plan_for(conn, [overnight])
+
+    head = text.splitlines()[0]
+    assert "Jan 09 2027 - Jan 16 2027" in head and "you asked" not in head

@@ -79,7 +79,7 @@ def env(monkeypatch, tmp_path):
     conn = db.connect(tmp_path / "test.db")
     db.init_schema(conn)
     trip_id = db.add_trip(conn, name="Costa Rica", origin="RNO", destination="SJO",
-                          depart_date=JAN9, return_date=JAN16, active=True)
+                          outbound_date=JAN9, return_date=JAN16, active=True)
     db.set_gateways(conn, trip_id, ["LAX"])
     db.set_balance(conn, "delta", 30_000)
     db.set_balance(conn, "capital_one", 100_000)
@@ -251,7 +251,7 @@ def test_notify_needs_a_topic_unless_it_is_a_dry_run(env, capsys):
 
 def test_only_active_trips_are_searched_and_alerted_on(env):
     conn, tmp_path = env
-    db.add_trip(conn, name="Shelved", origin="XXX", destination="YYY", depart_date=JAN9, active=False)
+    db.add_trip(conn, name="Shelved", origin="XXX", destination="YYY", outbound_date=JAN9, active=False)
 
     _, awards, ntfy = run(["notify"], tmp_path)
 
@@ -319,7 +319,7 @@ def test_plan_refresh_searches_again_and_saves_a_new_plan(env, capsys):
 
 def test_plan_with_several_active_trips_asks_which(env, capsys):
     conn, tmp_path = env
-    db.add_trip(conn, name="Other", origin="RNO", destination="SFO", depart_date=JAN9, active=True)
+    db.add_trip(conn, name="Other", origin="RNO", destination="SFO", outbound_date=JAN9, active=True)
 
     code, _, _ = run(["plan"], tmp_path)
 
@@ -572,7 +572,7 @@ def test_invalid_gateways_are_rejected_and_the_list_is_untouched(env, capsys, ar
 def test_gateways_for_a_one_way_trip_cost_half_as_much(env, capsys):
     conn, tmp_path = env
     db.set_trip_active(conn, 1, False)
-    db.add_trip(conn, name="One way", origin="RNO", destination="SFO", depart_date=JAN9, active=True)
+    db.add_trip(conn, name="One way", origin="RNO", destination="SFO", outbound_date=JAN9, active=True)
 
     run(["gateways", "2", "--add", "LAX", "DEN"], tmp_path)
 
@@ -581,7 +581,7 @@ def test_gateways_for_a_one_way_trip_cost_half_as_much(env, capsys):
 
 def test_gateways_needs_a_trip_id_when_several_are_active(env, capsys):
     conn, tmp_path = env
-    db.add_trip(conn, name="Other", origin="RNO", destination="SFO", depart_date=JAN9, active=True)
+    db.add_trip(conn, name="Other", origin="RNO", destination="SFO", outbound_date=JAN9, active=True)
 
     code, _, _ = run(["gateways"], tmp_path)
 
@@ -1113,7 +1113,7 @@ def test_trip_add_saves_it_and_says_what_it_will_cost_to_search(env, capsys):
                       "--gateways", "SEA", "LAX", "PHX"], tmp_path)
 
     out = capsys.readouterr().out
-    assert code == 0 and "Added trip 2: Kelowna, RNO > YLW, Dec 22 2026 - Dec 28 2026, priced in economy, premium economy and business." in out
+    assert code == 0 and "Added trip 2: Kelowna, RNO > YLW, leave Dec 22 2026, return Dec 28 2026, priced in economy, premium economy and business." in out
     assert "Gateways: LAX, PHX, SEA" in out and "Up to 14 Seats.aero searches per run" in out
     assert "Evaluate it with: python -m flight_optimizer report" in out
     assert [t["active"] for t in trip_rows(conn)] == [1, 1] and db.get_gateways(conn, 2) == ["LAX", "PHX", "SEA"]
@@ -1206,7 +1206,7 @@ def test_trip_set_errors_are_clear(env, capsys):
     assert "No trip with id 99" in capsys.readouterr().err
     assert run(["trip", "set", "1", "--depart", "2027-06-01"], tmp_path)[0] == 1     # the return is Jan 16 2027
     assert "return date is before" in capsys.readouterr().err
-    assert trip_rows(conn)[0]["depart_date"] == "2027-01-09"
+    assert trip_rows(conn)[0]["outbound_date"] == "2027-01-09"
 
 
 def test_active_and_inactive_cannot_both_be_given(env):
@@ -1259,7 +1259,7 @@ def test_advise_sends_the_computed_report_and_prints_the_answer(env, capsys):
 
 def test_advise_covers_every_active_trip_in_one_call(env):
     conn, tmp_path = env
-    db.add_trip(conn, name="Kelowna", origin="RNO", destination="YLW", depart_date=JAN9, return_date=JAN16, active=True)
+    db.add_trip(conn, name="Kelowna", origin="RNO", destination="YLW", outbound_date=JAN9, return_date=JAN16, active=True)
     advisor = FakeAdvisor()
 
     run(["advise"], tmp_path, advisor=advisor)
@@ -1270,7 +1270,7 @@ def test_advise_covers_every_active_trip_in_one_call(env):
 
 def test_advise_can_be_limited_to_one_trip(env):
     conn, tmp_path = env
-    db.add_trip(conn, name="Kelowna", origin="RNO", destination="YLW", depart_date=JAN9, return_date=JAN16, active=True)
+    db.add_trip(conn, name="Kelowna", origin="RNO", destination="YLW", outbound_date=JAN9, return_date=JAN16, active=True)
     advisor = FakeAdvisor()
 
     run(["advise", "2"], tmp_path, advisor=advisor)
@@ -1521,7 +1521,7 @@ def test_advise_on_every_trip_means_notify_need_not_ask_again(env):
 
 def test_advise_on_one_trip_does_not_stand_in_for_the_full_check(env):
     conn, tmp_path = env
-    db.add_trip(conn, name="Kelowna", origin="RNO", destination="YLW", depart_date=JAN9, return_date=JAN16, active=True)
+    db.add_trip(conn, name="Kelowna", origin="RNO", destination="YLW", outbound_date=JAN9, return_date=JAN16, active=True)
     advisor = FakeAdvisor()
     run(["advise", "1"], tmp_path, advisor=advisor)
 
@@ -1608,7 +1608,7 @@ def test_a_flexible_report_lists_the_shifted_dates(env, capsys):
     run(["report"], tmp_path, awards=shifted_awards())
 
     out = capsys.readouterr().out
-    assert "(flexible: arrive up to 3 days early, return +/-3)" in out and "Jan 07 - Jan 14" in out
+    assert "(flexible: +/-3 days)" in out and "Jan 07 - Jan 14" in out
 
 
 def test_trip_add_can_be_flexible_and_says_so(env, capsys):
@@ -1617,7 +1617,7 @@ def test_trip_add_can_be_flexible_and_says_so(env, capsys):
     run(["trip", "add", "Kelowna", "RNO", "YLW", "--depart", "2026-12-22", "--return", "2026-12-28", "--flexible"], tmp_path)
 
     out = capsys.readouterr().out
-    assert "Flexible: awards may land up to 3 days before the arrival date (never after it)" in out
+    assert "Flexible: awards are searched 3 days either side of each date." in out
     assert trip_rows(conn)[1]["flexible"] == 1
 
 
@@ -1626,7 +1626,7 @@ def test_trips_are_exact_by_default(env, capsys):
 
     run(["trip", "add", "Kelowna", "RNO", "YLW", "--depart", "2026-12-22"], tmp_path)
 
-    assert "Exact dates." in capsys.readouterr().out and trip_rows(conn)[1]["flexible"] == 0
+    assert "Exact departure dates." in capsys.readouterr().out and trip_rows(conn)[1]["flexible"] == 0
 
 
 def test_trip_set_switches_between_flexible_and_exact(env):
@@ -1655,7 +1655,7 @@ def test_the_trip_list_shows_which_trips_are_flexible(env, capsys):
     run(["trip", "list"], tmp_path)
 
     lines = capsys.readouterr().out.splitlines()
-    assert "Flexible" in lines[0] and "-3 / ±3" in lines[1]
+    assert "Flexible" in lines[0] and "+/-3 days" in lines[1]
 
 
 def test_switching_to_exact_alone_counts_as_a_change(env, capsys):
@@ -1709,7 +1709,7 @@ def test_an_unexpected_error_is_named_by_type_only_but_logged_in_full(env, capsy
 
 def test_one_trips_failure_does_not_cost_the_other_trip_its_alerts(env):
     conn, tmp_path = env
-    trip_id = db.add_trip(conn, name="Kelowna", origin="RNO", destination="YLW", depart_date=JAN9, return_date=JAN16, active=True)
+    trip_id = db.add_trip(conn, name="Kelowna", origin="RNO", destination="YLW", outbound_date=JAN9, return_date=JAN16, active=True)
     # Costa Rica's searches work; Kelowna's (RNO>YLW) fail.
     awards = ExplodingAwards(RuntimeError("x"), only=("RNO", "YLW"))
 
@@ -1836,7 +1836,7 @@ def test_a_run_that_failed_still_counts_as_attempted_so_it_is_not_reported_as_mi
 
 def add_twin_trip(conn):
     """A second trip over the same route and dates: its best option needs exactly what the first trip's does."""
-    trip_id = db.add_trip(conn, name="Kelowna", origin="RNO", destination="SJO", depart_date=JAN9, return_date=JAN16, active=True)
+    trip_id = db.add_trip(conn, name="Kelowna", origin="RNO", destination="SJO", outbound_date=JAN9, return_date=JAN16, active=True)
     db.set_gateways(conn, trip_id, ["LAX"])
     return trip_id
 
@@ -2079,3 +2079,51 @@ def test_clearing_a_target_that_was_never_set_says_so(env, capsys):
     run(["trip", "target", "1", "economy", "--clear"], tmp_path)
 
     assert "was not set" in capsys.readouterr().out
+
+
+# --- what the dates mean: departure by default, arrival only when asked ----------------------------
+
+def test_trip_add_takes_departure_dates_by_default(env, capsys):
+    conn, tmp_path = env
+
+    run(["trip", "add", "Kelowna", "RNO", "YLW", "--depart", "2026-12-22", "--return", "2026-12-28"], tmp_path)
+
+    assert trip_rows(conn)[1]["date_anchor"] == "depart"
+    assert "leave Dec 22 2026, return Dec 28 2026" in capsys.readouterr().out
+
+
+def test_trip_add_with_arrive_saves_an_arrival_date_and_explains_it(env, capsys):
+    conn, tmp_path = env
+
+    run(["trip", "add", "Kelowna", "RNO", "YLW", "--arrive", "2026-12-22", "--return", "2026-12-28", "--flexible"],
+        tmp_path)
+
+    row = trip_rows(conn)[1]
+    out = capsys.readouterr().out
+    assert row["date_anchor"] == "arrive" and row["outbound_date"] == "2026-12-22" and row["flexible"] == 1
+    assert "arrive Dec 22 2026, return Dec 28 2026" in out
+    assert "must land on it and may leave up to 1 day earlier" in out and "land up to 3 days either side of the arrival date" in out
+
+
+def test_trip_add_needs_exactly_one_of_depart_or_arrive(env, capsys):
+    _, tmp_path = env
+
+    for extra in ([], ["--depart", "2026-12-22", "--arrive", "2026-12-22"]):
+        with pytest.raises(SystemExit):
+            run(["trip", "add", "X", "RNO", "YLW", *extra], tmp_path)
+    capsys.readouterr()
+
+
+def test_trip_set_arrive_or_depart_changes_the_anchor_and_keeps_cash_history_on_the_same_date(env, capsys):
+    conn, tmp_path = env
+    db.record_cash_total(conn, 1, "economy", "2026-09-20T00:00:00Z", 700)
+
+    run(["trip", "set", "1", "--arrive", "2027-01-09"], tmp_path)   # same date, now an arrival date
+    assert trip_rows(conn)[0]["date_anchor"] == "arrive"
+    assert conn.execute("SELECT COUNT(*) FROM cash_history").fetchone()[0] == 1
+
+    run(["trip", "set", "1", "--depart", "2027-01-10"], tmp_path)   # a new date clears it
+    row = trip_rows(conn)[0]
+    assert row["date_anchor"] == "depart" and row["outbound_date"] == "2027-01-10"
+    assert conn.execute("SELECT COUNT(*) FROM cash_history").fetchone()[0] == 0
+    capsys.readouterr()

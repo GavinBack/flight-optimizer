@@ -54,7 +54,7 @@ from flight_optimizer.promos import (
 from flight_optimizer.buying import RETAIL_PRICES
 from flight_optimizer.programs import PROGRAM_NAMES, format_balances, parse_miles, resolve_program
 from flight_optimizer.trips import add_trip, format_trips, parse_date
-from flight_optimizer.windows import EARLY_DEPARTURE_DAYS, FLEXIBLE_WINDOW_DAYS
+from flight_optimizer.windows import EARLY_DEPARTURE_DAYS, FLEXIBLE_WINDOW_DAYS, is_arrival, trip_dates
 from flight_optimizer.report import build_report
 from flight_optimizer.seats_aero import SeatsAeroClient, SeatsAeroError
 from flight_optimizer.seats_cache import CachedSeatsAero
@@ -149,23 +149,32 @@ def _build_parser() -> argparse.ArgumentParser:
     add_trip_parser.add_argument("name")
     add_trip_parser.add_argument("origin", help="airport code, e.g. RNO")
     add_trip_parser.add_argument("destination", help="airport code, e.g. YLW")
-    add_trip_parser.add_argument("--depart", required=True, metavar="YYYY-MM-DD",
-                                 help=f"the day you want to ARRIVE (the flight may leave up to {EARLY_DEPARTURE_DAYS} day earlier)")
+    outbound = add_trip_parser.add_mutually_exclusive_group(required=True)
+    outbound.add_argument("--depart", metavar="YYYY-MM-DD", help="the day the outbound leaves (the usual way)")
+    outbound.add_argument("--arrive", metavar="YYYY-MM-DD",
+                          help=f"instead of --depart: the day you must ARRIVE (the flight may leave up to "
+                               f"{EARLY_DEPARTURE_DAYS} day earlier, and must land that day)")
     add_trip_parser.add_argument("--return", dest="return_date", metavar="YYYY-MM-DD",
-                                 help="the day you want to leave to come home; omit for a one-way trip")
+                                 help="the day the return leaves; omit for a one-way trip")
     add_trip_parser.add_argument("--gateways", nargs="+", default=[], metavar="AIRPORT",
                                  help="hub airports to route through when origin and destination have no direct award route")
     add_trip_parser.add_argument("--flexible", action="store_true",
-                                 help=f"awards may land up to {FLEXIBLE_WINDOW_DAYS} days before the arrival date and return {FLEXIBLE_WINDOW_DAYS} days either side (default: exact dates)")
+                                 help=f"search awards {FLEXIBLE_WINDOW_DAYS} days either side of each date "
+                                      "(default: exact dates)")
     add_trip_parser.add_argument("--inactive", action="store_true", help="save it without searching or alerting on it yet")
     set_trip = trip_actions.add_parser("set", help="change a trip's name, dates, flexibility, or whether it is active")
     set_trip.add_argument("trip_id", type=int)
     set_trip.add_argument("--name")
-    set_trip.add_argument("--depart", metavar="YYYY-MM-DD", help="the day you want to arrive")
-    set_trip.add_argument("--return", dest="return_date", metavar="YYYY-MM-DD", help="the day you want to leave to come home")
+    outbound_change = set_trip.add_mutually_exclusive_group()
+    outbound_change.add_argument("--depart", metavar="YYYY-MM-DD",
+                                 help="the day the outbound leaves (makes the date a departure date)")
+    outbound_change.add_argument("--arrive", metavar="YYYY-MM-DD",
+                                 help="the day you must arrive (makes the date an arrival date)")
+    set_trip.add_argument("--return", dest="return_date", metavar="YYYY-MM-DD", help="the day the return leaves")
     set_trip.add_argument("--one-way", action="store_true", help="drop the return leg")
     window = set_trip.add_mutually_exclusive_group()
-    window.add_argument("--flexible", action="store_true", help=f"land up to {FLEXIBLE_WINDOW_DAYS} days early, return {FLEXIBLE_WINDOW_DAYS} days either side")
+    window.add_argument("--flexible", action="store_true",
+                        help=f"search awards {FLEXIBLE_WINDOW_DAYS} days either side of each date")
     window.add_argument("--exact", action="store_true", help="search the exact dates only")
     state = set_trip.add_mutually_exclusive_group()
     state.add_argument("--active", action="store_true", help="search and alert on this trip")
@@ -557,6 +566,20 @@ def _run_trip_target(conn, args) -> int:
     return 0
 
 
+def _dates_explained(trip) -> str:
+    """One sentence on how a trip's dates are searched."""
+    if is_arrival(trip):
+        text = (f"Arrival date: the flight there must land on it and may leave up to {EARLY_DEPARTURE_DAYS} day "
+                "earlier; the return leaves on its date.")
+        if trip["flexible"]:
+            text += (f" Flexible: awards may land up to {FLEXIBLE_WINDOW_DAYS} days either side of the arrival date "
+                     f"and return {FLEXIBLE_WINDOW_DAYS} days either side of the return date.")
+        return text
+    if trip["flexible"]:
+        return f"Flexible: awards are searched {FLEXIBLE_WINDOW_DAYS} days either side of each date."
+    return "Exact departure dates."
+
+
 def _run_trip(conn, args) -> int:
     action = getattr(args, "trip_action", None)
     if action in (None, "list"):
@@ -564,19 +587,19 @@ def _run_trip(conn, args) -> int:
         return 0
 
     if action == "add":
-        depart = parse_date(args.depart, "--depart")
+        anchor, flag = ("arrive", "--arrive") if args.arrive else ("depart", "--depart")
+        outbound = parse_date(args.arrive or args.depart, flag)
         return_date = parse_date(args.return_date, "--return") if args.return_date else None
         trip_id = add_trip(
-            conn, name=args.name, origin=args.origin, destination=args.destination, depart_date=depart,
+            conn, name=args.name, origin=args.origin, destination=args.destination, outbound_date=outbound,
             return_date=return_date, gateways=args.gateways, active=not args.inactive, flexible=args.flexible,
+            date_anchor=anchor,
         )
         trip = conn.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
         gateways = db.get_gateways(conn, trip_id)
         print(f"Added trip {trip_id}: {trip['name']}, {trip['origin']} > {trip['destination']}, "
-              f"{depart:%b %d %Y}" + (f" - {return_date:%b %d %Y}" if return_date else " (one way)")
-              + ", priced in economy, premium economy and business."
-              + (f" Flexible: awards may land up to {FLEXIBLE_WINDOW_DAYS} days before the arrival date (never after it), and return {FLEXIBLE_WINDOW_DAYS} days either side of the return date."
-                 if trip["flexible"] else " Exact dates."))
+              f"{trip_dates(trip)}" + ("" if return_date else " (one way)")
+              + ", priced in economy, premium economy and business. " + _dates_explained(trip))
         print(f"Gateways: {', '.join(gateways) if gateways else 'none'}")
         if not gateways:
             print(f"No gateways: only the direct {trip['origin']} > {trip['destination']} pair is searched, "
@@ -594,14 +617,18 @@ def _run_trip(conn, args) -> int:
     active = True if args.active else False if args.inactive else None
     changes = dict(
         name=args.name,
-        depart_date=parse_date(args.depart, "--depart") if args.depart else None,
+        outbound_date=(parse_date(args.depart, "--depart") if args.depart
+                     else parse_date(args.arrive, "--arrive") if args.arrive else None),
+        date_anchor="depart" if args.depart else "arrive" if args.arrive else None,
         return_date=parse_date(args.return_date, "--return") if args.return_date else None,
         one_way=args.one_way, active=active,
         flexible=True if args.flexible else False if args.exact else None,
     )
-    given = (args.name, args.depart, args.return_date, args.one_way, args.active, args.inactive, args.flexible, args.exact)
+    given = (args.name, args.depart, args.arrive, args.return_date, args.one_way, args.active, args.inactive,
+             args.flexible, args.exact)
     if not any(given):   # judged from what was typed: --inactive means "change it", though its value is False
-        print("Nothing to change: give at least one of --name, --depart, --return, --one-way, --flexible, --exact, --active, --inactive.")
+        print("Nothing to change: give at least one of --name, --depart, --arrive, --return, --one-way, --flexible, "
+              "--exact, --active, --inactive.")
         return 1
     db.update_trip(conn, trip["id"], **changes)
     print("Updated.\n")

@@ -121,7 +121,7 @@ The database starts empty. You need to add at least one trip and your balances.
 python -m flight_optimizer trip add "Costa Rica" RNO SJO --depart 2027-01-09 --return 2027-01-16 --gateways LAX
 ```
 
-- Dates are year-month-day. Leave out `--return` for a one-way trip.
+- Dates are year-month-day and are the days the flights leave. If you must arrive by a certain day instead, use `--arrive` in place of `--depart`. Leave out `--return` for a one-way trip.
 - `--gateways` lists hub airports to route through. Seats.aero only knows airport pairs that airlines publish, so a small airport often has no direct award route. Routing RNO to LAX, then LAX to SJO, finds options a direct search misses. Each extra hub adds Seats.aero calls, so start with one or two big hubs near your origin.
 - Add `--flexible` to also search 3 days either side of each date.
 - Trips start active, so the app searches and alerts on them straight away. Add `--inactive` to save one without that.

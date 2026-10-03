@@ -66,12 +66,12 @@ of 2.5 hours or more, and current data (3 days or newer is current, over 7 days 
 any target price the owner set. Use them to judge whether a cash fare is good; with little history, say so.
 - Award data is a cached snapshot, not live. Flight times are local. Award taxes and fees are included in the dollar figures and cents per mile, converted at fixed approximate \
 exchange rates (a + after a tax amount means some could not be converted): treat them as approximate.
-- A trip's first date is the day the owner wants to ARRIVE, and its return date the day they want to leave. \
-An outbound award may leave up to {EARLY_DEPARTURE_DAYS} day earlier and land on the day (options show "(leave ...)" when \
-they do); cash fares are for flights leaving on the arrival day.
-- A trip marked flexible searches awards landing up to {FLEXIBLE_WINDOW_DAYS} days BEFORE the arrival date (never after: it is a \
-deadline) and returning up to {FLEXIBLE_WINDOW_DAYS} days either side of the return date, so an option may be on shifted \
-dates (each option shows its dates). Cash fares are only for the exact requested dates, so compare a shifted \
+- Each trip's header says what its dates mean. "leave D, return R": the outbound leaves on D and the return \
+leaves on R (the default). "arrive D, return R": the outbound must land on D and may leave up to \
+{EARLY_DEPARTURE_DAYS} day earlier (options show "(leave ...)" when they do); the return leaves on R. Cash fares are \
+always for flights leaving on the trip's own dates.
+- A flexible trip widens the award search by {FLEXIBLE_WINDOW_DAYS} days either side of each date (for an arrival \
+date, the day the outbound lands). So an option may be on shifted dates (each option shows its dates). Cash fares are only for the exact requested dates, so compare a shifted \
 award with the cash fare cautiously and say so. Note which shifted dates you would be committing to.
 
 How to work:
@@ -329,8 +329,8 @@ def fingerprint(
         "trips": [
             [
                 {
-                    "trip": [a.trip["id"], a.trip["origin"], a.trip["destination"], a.trip["depart_date"],
-                             a.trip["return_date"], bool(a.trip["flexible"])],
+                    "trip": [a.trip["id"], a.trip["origin"], a.trip["destination"], a.trip["outbound_date"],
+                             a.trip["return_date"], bool(a.trip["flexible"]), a.trip["date_anchor"]],
                     "cabin": a.cabin.name,
                     "cash": None if a.baseline is None else [cash(a.baseline.cabin_total), cash(a.baseline.economy_total)],
                     "target": a.cash_target,

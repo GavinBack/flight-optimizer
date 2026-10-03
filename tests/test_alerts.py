@@ -675,7 +675,7 @@ def test_the_value_line_shows_taxes_only_when_there_are_some(conn):
 
 
 def test_an_alert_leaving_the_day_before_the_asked_arrival_shows_both_days(conn):
-    trip = add_trip(conn)  # exact dates: arrive Jan 09, leave Jan 16
+    trip = add_trip(conn, date_anchor="arrive")  # exact dates: arrive Jan 09, return Jan 16
     early = option(
         [leg("RNO", "LAX", "delta", 10_900, date(2027, 1, 8)), leg("LAX", "SJO", "aeroplan", 25_000, JAN9)],
         [leg("SJO", "LAX", "aeroplan", 25_000, JAN16), leg("LAX", "RNO", "delta", 10_900, JAN16)],
@@ -684,3 +684,15 @@ def test_an_alert_leaving_the_day_before_the_asked_arrival_shows_both_days(conn)
     alert = decide_alert(conn, analysis_for(trip, [early]))
 
     assert alert.message.split("\n")[0] == "RNO > SJO  Jan 09 (leave Jan 08) - Jan 16  (business)"
+
+
+def test_on_a_departure_dated_trip_an_option_leaving_on_the_day_is_on_the_asked_dates(conn):
+    trip = add_trip(conn)  # the default: leave Jan 09, return Jan 16
+    late = option(  # leaves Jan 09, connects overnight and lands Jan 10: still the asked departure day
+        [leg("RNO", "LAX", "delta", 10_900, JAN9), leg("LAX", "SJO", "aeroplan", 25_000, JAN10)],
+        [leg("SJO", "LAX", "aeroplan", 25_000, JAN16), leg("LAX", "RNO", "delta", 10_900, JAN16)],
+    )
+
+    alert = decide_alert(conn, analysis_for(trip, [late]))
+
+    assert alert.message.split("\n")[0] == "RNO > SJO  Jan 09 - Jan 16  (business)"

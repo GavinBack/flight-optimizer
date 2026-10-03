@@ -69,7 +69,7 @@ def trip_baseline(
     Costs up to 2 searches per direction (`cabin` and economy), fewer if cached; for economy
     itself the two are the same search.
     """
-    directions = [(trip["origin"], trip["destination"], date.fromisoformat(trip["depart_date"]))]
+    directions = [(trip["origin"], trip["destination"], date.fromisoformat(trip["outbound_date"]))]
     if trip["return_date"]:
         directions.append(
             (trip["destination"], trip["origin"], date.fromisoformat(trip["return_date"]))

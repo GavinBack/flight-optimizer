@@ -31,11 +31,15 @@ CREATE TABLE IF NOT EXISTS trips (
     name        TEXT NOT NULL,
     origin      TEXT NOT NULL,
     destination TEXT NOT NULL,
-    depart_date TEXT NOT NULL,
-    return_date TEXT,
+    -- The outbound date (named depart_date before 2026-10-03). What it means is set by date_anchor: the day
+    -- the outbound leaves (default) or lands.
+    outbound_date TEXT NOT NULL,
+    return_date TEXT,  -- the day the return leaves
+    -- 'depart' (default): outbound_date is the day to leave. 'arrive': it is the day to land (see windows.py).
+    date_anchor TEXT NOT NULL DEFAULT 'depart' CHECK (date_anchor IN ('depart', 'arrive')),
     -- Gates the daily check and every alert for this trip. Off by default.
     active      INTEGER NOT NULL DEFAULT 0 CHECK (active IN (0, 1)),
-    -- 0 searches the exact dates; 1 lands up to FLEXIBLE_WINDOW_DAYS early and returns that many days either side.
+    -- 0 searches the exact dates; 1 widens them by FLEXIBLE_WINDOW_DAYS (how depends on date_anchor, see windows.py).
     flexible    INTEGER NOT NULL DEFAULT 0 CHECK (flexible IN (0, 1)),
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
@@ -183,6 +187,20 @@ def init_schema(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "ALTER TABLE trips ADD COLUMN flexible INTEGER NOT NULL DEFAULT 0 CHECK (flexible IN (0, 1))"
             )
+    if "depart_date" in columns:  # renamed 2026-10-03: it can hold an arrival date, so "depart" misled
+        _backup_before_migration(conn)
+        with conn:
+            conn.execute("ALTER TABLE trips RENAME COLUMN depart_date TO outbound_date")
+    if "date_anchor" not in columns:
+        # From 2026-09-22 to 2026-10-03 every trip's first date meant the day to land. Trips saved then keep
+        # that meaning; new trips default to the day to leave. Done once: the column then exists.
+        _backup_before_migration(conn)
+        with conn:
+            conn.execute(
+                "ALTER TABLE trips ADD COLUMN date_anchor TEXT NOT NULL DEFAULT 'depart'"
+                " CHECK (date_anchor IN ('depart', 'arrive'))"
+            )
+            conn.execute("UPDATE trips SET date_anchor = 'arrive'")
     retired = [name for name in RETIRED_TRIP_COLUMNS if name in columns]
     if retired:
         _backup_before_migration(conn)
@@ -197,28 +215,40 @@ def add_trip(
     name: str,
     origin: str,
     destination: str,
-    depart_date: date,
+    outbound_date: date,
     return_date: date | None = None,
     active: bool = False,
     flexible: bool = False,
+    date_anchor: str = "depart",
 ) -> int:
-    """Save a trip. `flexible` widens the award search (see `windows.py`)."""
+    """Save a trip. `outbound_date` is the day to leave, or with `date_anchor="arrive"` the day to land;
+    `flexible` widens the award search (see `windows.py`)."""
+    _check_anchor(date_anchor)
     with conn:
         cur = conn.execute(
-            "INSERT INTO trips (name, origin, destination, depart_date, return_date,"
-            " active, flexible)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO trips (name, origin, destination, outbound_date, return_date,"
+            " active, flexible, date_anchor)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 name,
                 origin.upper(),
                 destination.upper(),
-                depart_date.isoformat(),
+                outbound_date.isoformat(),
                 return_date.isoformat() if return_date else None,
                 int(active),
                 int(flexible),
+                date_anchor,
             ),
         )
     return cur.lastrowid
+
+
+DATE_ANCHORS = ("depart", "arrive")
+
+
+def _check_anchor(anchor: str) -> None:
+    if anchor not in DATE_ANCHORS:
+        raise ValueError(f"date_anchor must be one of {', '.join(DATE_ANCHORS)}, not {anchor!r}")
 
 
 def set_gateways(conn: sqlite3.Connection, trip_id: int, airports: list[str]) -> None:
@@ -257,18 +287,21 @@ def update_trip(
     trip_id: int,
     *,
     name: str | None = None,
-    depart_date: date | None = None,
+    outbound_date: date | None = None,
     return_date: date | None = None,
     one_way: bool = False,
     active: bool | None = None,
     flexible: bool | None = None,
+    date_anchor: str | None = None,
 ) -> None:
     """Change a trip. Only the fields given are touched; `one_way` clears the return date."""
+    if date_anchor is not None:
+        _check_anchor(date_anchor)
     trip = conn.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
     if trip is None:
         raise LookupError(f"No trip with id {trip_id}")
 
-    new_depart = depart_date or date.fromisoformat(trip["depart_date"])
+    new_depart = outbound_date or date.fromisoformat(trip["outbound_date"])
     if one_way:
         new_return = None
     elif return_date is not None:
@@ -276,22 +309,25 @@ def update_trip(
     else:
         new_return = date.fromisoformat(trip["return_date"]) if trip["return_date"] else None
     if new_return is not None and new_return < new_depart:
-        raise ValueError("The return date is before the departure date.")
+        raise ValueError("The return date is before the outbound date.")
 
     moved = (new_depart.isoformat(), new_return.isoformat() if new_return else None) != (
-        trip["depart_date"], trip["return_date"]
+        trip["outbound_date"], trip["return_date"]
     )
+    # Cash fares always search departures on the stored dates, so a change of anchor alone keeps their history.
     with conn:
         if moved:  # fares for other dates say nothing about these ones
             conn.execute("DELETE FROM cash_history WHERE trip_id = ?", (trip_id,))
         conn.execute(
-            "UPDATE trips SET name = ?, depart_date = ?, return_date = ?, active = ?, flexible = ? WHERE id = ?",
+            "UPDATE trips SET name = ?, outbound_date = ?, return_date = ?, active = ?, flexible = ?, date_anchor = ?"
+            " WHERE id = ?",
             (
                 name if name is not None else trip["name"],
                 new_depart.isoformat(),
                 new_return.isoformat() if new_return else None,
                 int(active) if active is not None else trip["active"],
                 int(flexible) if flexible is not None else trip["flexible"],
+                date_anchor if date_anchor is not None else trip["date_anchor"],
                 trip_id,
             ),
         )

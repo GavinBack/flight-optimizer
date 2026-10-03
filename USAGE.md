@@ -130,11 +130,13 @@ python -m flight_optimizer trip add "Costa Rica" RNO SJO --depart 2027-01-09 --r
 ```
 
 - The name comes first, then the airport you leave from, then where you are going.
-- `--depart` is required. It is the day you want to **arrive**. The flight there may leave up to 1 day earlier (an evening or overnight flight), but it must land on that day. Dates are written year-month-day.
-- `--return` is the day you want to **leave** to come home.
+- Give the outbound date one of two ways. Dates are written year-month-day.
+  - `--depart` (the usual way): the day the flight there **leaves**.
+  - `--arrive` (only if you choose it): the day you must **arrive**. The flight there may leave up to 1 day earlier (an evening or overnight flight), but it must land on that day.
+- `--return` is the day the flight home **leaves**.
 - Leave out `--return` for a one-way trip.
 - `--gateways` lists the hub airports to route through. Many small airports have no direct award route, so the app searches through big hubs instead (for example RNO to LAX, then LAX to SJO).
-- `--flexible` lets the flight there land up to 3 days before your arrival date (never after it), and the flight home leave up to 3 days either side of the return date. Cash prices are still checked only for your exact dates, and for flights that leave on the day you want to arrive.
+- `--flexible` searches awards up to 3 days either side of each date. With `--arrive`, that is the day the flight there lands. Cash prices are always checked only for flights leaving on your exact dates.
 - `--inactive` saves the trip without searching it yet.
 
 A new trip starts searching at the next report or daily check.
@@ -150,7 +152,7 @@ python -m flight_optimizer trip set 2 --inactive
 You can change these:
 
 - `--name` renames the trip.
-- `--depart` and `--return` change the dates. `--one-way` drops the return leg. Changing the dates clears the saved cash price history for that trip.
+- `--depart` and `--return` change the dates. `--arrive` changes the outbound date and makes it an arrival date; `--depart` makes it a departure date again. `--one-way` drops the return leg. Changing a date clears the saved cash price history for that trip (switching between `--depart` and `--arrive` on the same date does not).
 - `--flexible` or `--exact` turns the 3-day windows on or off.
 - `--active` or `--inactive` starts or stops searching and alerts. An inactive trip sends no alerts at all, however good the deal.
 

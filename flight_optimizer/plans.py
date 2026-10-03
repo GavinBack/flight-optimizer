@@ -144,7 +144,7 @@ def render_plan(
     trip = analysis.trip
     urgency = urgency or assess_urgency(option)
     cabin = cabin_label(analysis.cabin)
-    dates = option_dates(option, "%b %d %Y")
+    dates = option_dates(option, trip, "%b %d %Y")
     if not on_asked_dates(trip, option):  # a flexible trip's option on other days
         dates += f" (you asked {asked_dates(trip, '%b %d %Y')}, flexible)"
 

@@ -101,7 +101,7 @@ def test_moving_a_trips_dates_clears_its_history_but_a_rename_does_not(conn):
     db.update_trip(conn, trip["id"], name="Renamed", flexible=True)
     assert conn.execute("SELECT COUNT(*) FROM cash_history").fetchone()[0] == 1
 
-    db.update_trip(conn, trip["id"], depart_date=date(2027, 1, 10))
+    db.update_trip(conn, trip["id"], outbound_date=date(2027, 1, 10))
     assert conn.execute("SELECT COUNT(*) FROM cash_history").fetchone()[0] == 0
 
 

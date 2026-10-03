@@ -82,7 +82,7 @@ def conn():
 
 
 def add_trip(conn, **overrides):
-    fields = dict(name="CR", origin="RNO", destination="SJO", depart_date=JAN9, return_date=JAN16)
+    fields = dict(name="CR", origin="RNO", destination="SJO", outbound_date=JAN9, return_date=JAN16)
     trip_id = db.add_trip(conn, **{**fields, **overrides})
     return conn.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
 

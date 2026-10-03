@@ -17,7 +17,7 @@ def conn():
 
 
 def trip(conn, **overrides):
-    fields = dict(name="T", origin="RNO", destination="SJO", depart_date=JAN9, return_date=date(2027, 1, 16))
+    fields = dict(name="T", origin="RNO", destination="SJO", outbound_date=JAN9, return_date=date(2027, 1, 16))
     trip_id = db.add_trip(conn, **{**fields, **overrides})
     return conn.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
 
@@ -27,8 +27,8 @@ def test_the_owners_window_is_three_days_either_side():
 
 
 def test_trips_are_exact_unless_marked_flexible(conn):
-    assert trip(conn)["flexible"] == 0 and window_days(trip(conn, name="X", depart_date=date(2027, 2, 1))) == 0
-    flexible = trip(conn, name="Flex", depart_date=date(2027, 3, 1), flexible=True)
+    assert trip(conn)["flexible"] == 0 and window_days(trip(conn, name="X", outbound_date=date(2027, 2, 1))) == 0
+    flexible = trip(conn, name="Flex", outbound_date=date(2027, 3, 1), flexible=True)
     assert flexible["flexible"] == 1 and window_days(flexible) == 3
 
 
@@ -52,7 +52,10 @@ def test_a_window_that_has_wholly_passed_is_nothing():
 
 def test_the_note_is_empty_for_exact_trips_and_states_the_window_for_flexible_ones(conn):
     assert window_note(trip(conn)) == ""
-    assert window_note(trip(conn, name="Flex", depart_date=date(2027, 3, 1), flexible=True)) == " (flexible: arrive up to 3 days early, return +/-3)"
+    assert window_note(trip(conn, name="Flex", outbound_date=date(2027, 3, 1), flexible=True)) == " (flexible: +/-3 days)"
+    assert window_note(trip(conn, name="Arrive", outbound_date=date(2027, 4, 1), flexible=True, date_anchor="arrive")) == (
+        " (flexible: +/-3 days)"
+    )
 
 
 # --- the database column -----------------------------------------------------------------------------------
@@ -83,6 +86,45 @@ def test_an_existing_database_gets_the_column_without_losing_trips(tmp_path):
 
     (row,) = conn.execute("SELECT * FROM trips").fetchall()
     assert row["name"] == "Costa Rica" and row["active"] == 1 and row["flexible"] == 0
+    # saved when every outbound date meant the day to land: it keeps that meaning
+    assert row["date_anchor"] == "arrive"
+    assert row["outbound_date"] == "2027-01-09" and "depart_date" not in row.keys()  # the column was renamed
+    assert list(tmp_path.glob("old-backup-*.db"))  # backed up before the meaning was written down
+
+
+def test_the_anchor_migration_runs_once_and_new_trips_default_to_departure(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "sept.db"
+    old = sqlite3.connect(path)
+    old.executescript(
+        """
+        CREATE TABLE trips (
+            id INTEGER PRIMARY KEY, name TEXT NOT NULL, origin TEXT NOT NULL, destination TEXT NOT NULL,
+            depart_date TEXT NOT NULL, return_date TEXT, active INTEGER NOT NULL DEFAULT 0,
+            flexible INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+        INSERT INTO trips (name, origin, destination, depart_date, return_date, active, flexible)
+        VALUES ('Kelowna', 'RNO', 'YLW', '2026-12-22', '2026-12-28', 1, 1);
+        """
+    )
+    old.commit()
+    old.close()
+
+    conn = db.connect(path)
+    db.init_schema(conn)
+    db.update_trip(conn, 1, date_anchor="depart")  # the owner switches it back
+    new_id = db.add_trip(conn, name="New", origin="RNO", destination="SJO", outbound_date=date(2027, 5, 1))
+    db.init_schema(conn)  # a later start must not flip it again
+
+    anchors = dict(conn.execute("SELECT id, date_anchor FROM trips").fetchall())
+    assert anchors == {1: "depart", new_id: "depart"}
+
+
+def test_an_unknown_anchor_is_refused(conn):
+    with pytest.raises(ValueError, match="date_anchor"):
+        db.add_trip(conn, name="X", origin="RNO", destination="SJO", outbound_date=JAN9, date_anchor="land")
 
 
 def test_the_column_only_accepts_zero_or_one(conn):
@@ -104,13 +146,13 @@ def test_update_can_switch_a_trip_between_exact_and_flexible_and_leaves_it_alone
     assert conn.execute("SELECT flexible FROM trips").fetchone()[0] == 0
 
 
-def test_a_flexible_arrival_date_is_a_deadline():
+def test_a_flexible_arrival_date_lands_three_days_either_side():
     from flight_optimizer.windows import outbound_windows
 
     leaving, landing = outbound_windows(date(2026, 12, 22), 3, today=date(2026, 9, 22))
 
-    assert landing == (date(2026, 12, 19), date(2026, 12, 22))  # up to 3 days early, never late
-    assert leaving == (date(2026, 12, 18), date(2026, 12, 22))  # a day before the earliest landing
+    assert landing == (date(2026, 12, 19), date(2026, 12, 25))
+    assert leaving == (date(2026, 12, 18), date(2026, 12, 25))  # from a day before the earliest landing
 
 
 def test_an_exact_arrival_may_still_leave_the_day_before():

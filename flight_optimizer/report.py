@@ -28,7 +28,7 @@ from flight_optimizer.promos import Promo, active_promos, best_promos
 from flight_optimizer.savings import TripBaseline, estimate_value
 from flight_optimizer.taxes import option_taxes, rates_note
 from flight_optimizer.seats_aero import AwardResult, Cabin, SeatsAeroClient
-from flight_optimizer.windows import EARLY_DEPARTURE_DAYS, option_dates, window_note
+from flight_optimizer.windows import EARLY_DEPARTURE_DAYS, is_arrival, option_dates, trip_dates, window_note
 
 RULE = "=" * 78
 
@@ -135,16 +135,16 @@ def _group_by_shape(options: list[TripOption]) -> list[tuple[TripOption, list[Tr
     return [(members[0], members[1:]) for members in groups.values()]
 
 
-def _option_dates(option: TripOption) -> str:
+def _option_dates(option: TripOption, trip: sqlite3.Row) -> str:
     """The travel dates of an option, e.g. "Jan 07 - Jan 14" (the day it lands, and the day the return leaves)."""
-    return option_dates(option)
+    return option_dates(option, trip)
 
 
-def _variants_text(option: TripOption, variants: list[TripOption]) -> str:
+def _variants_text(option: TripOption, variants: list[TripOption], trip: sqlite3.Row) -> str:
     """"(+2 other date combinations at the same price: Jan 06 - Jan 13, ...)". The dates are listed only
     when they differ from the shown option's: with flexible dates that is the point of the line."""
     n = len(variants)
-    others = list(dict.fromkeys(d for v in variants if (d := _option_dates(v)) != _option_dates(option)))
+    others = list(dict.fromkeys(d for v in variants if (d := _option_dates(v, trip)) != _option_dates(option, trip)))
     listed = ""
     if others:
         listed = ": " + ", ".join(others[:5]) + (f", +{len(others) - 5} more" if len(others) > 5 else "")
@@ -416,9 +416,7 @@ def render_trip(
     today: date | None = None,
 ) -> str:
     today = today or date.today()
-    dates = f"arrive {date.fromisoformat(trip['depart_date']):%b %d %Y}"
-    if trip["return_date"]:
-        dates += f", leave {date.fromisoformat(trip['return_date']):%b %d %Y}"
+    dates = trip_dates(trip)
     cabin_name = cabin_label(cabin)
 
     out = [RULE, f"{trip['name']}   {trip['origin']} > {trip['destination']}   {dates}   ({cabin_name}){window_note(trip)}"]
@@ -430,10 +428,11 @@ def render_trip(
         f"CASH BASELINE  (cheapest fare, layovers over {MIN_CONNECTION_MINUTES // 60}h and up to "
         f"{DEFAULT_MAX_LAYOVER_MINUTES // 60}h, total <= {DEFAULT_MAX_TOTAL_MINUTES // 60}h)"
     )
-    out.append(
-        f"  Cash fares leave on the day you want to arrive; awards may also leave up to {EARLY_DEPARTURE_DAYS} day"
-        f"{'s' if EARLY_DEPARTURE_DAYS != 1 else ''} earlier."
-    )
+    if is_arrival(trip):
+        out.append(
+            f"  Cash fares leave on the day you want to arrive; awards may also leave up to {EARLY_DEPARTURE_DAYS} day"
+            f"{'s' if EARLY_DEPARTURE_DAYS != 1 else ''} earlier."
+        )
     if trip["flexible"]:
         out.append("  Cash fares are for your exact dates. Flexible dates apply to awards only.")
     if baseline is None:
@@ -484,7 +483,7 @@ def render_trip(
         if taxes.usd or not taxes.complete:
             head += f" + {taxes.text}"
         if trip["flexible"]:
-            head += f"   {_option_dates(option)}"
+            head += f"   {_option_dates(option, trip)}"
         if baseline is not None:
             value = estimate_value(option, baseline)
             if value.cents_per_mile_vs_cabin is not None:
@@ -501,7 +500,7 @@ def render_trip(
         for index, warning in enumerate(_warnings(option, today)):
             out.append(("  check: " if index == 0 else "         ") + warning)
         if variants:
-            out.append("  " + _variants_text(option, variants))
+            out.append("  " + _variants_text(option, variants, trip))
 
     out.extend(_cash_ticket_lines(baseline, cabin, affordable[0] if affordable else None))
 

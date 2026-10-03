@@ -51,7 +51,7 @@ def sale(program="delta", url="https://x.test/s", tiers=()):
 # --- what the status says ----------------------------------------------------------------------------------
 
 def test_the_header_names_the_trip_route_and_dates(conn):
-    assert section(conn, [affordable()])[0] == "Costa Rica: RNO > SJO  Jan 09 - Jan 16"
+    assert section(conn, [affordable()])[0] == "Costa Rica: RNO > SJO  leave Jan 09, return Jan 16"
 
 
 def test_a_mix_of_fresh_and_stale_options_is_counted_by_tier(conn):
@@ -84,7 +84,7 @@ def test_with_nothing_affordable_it_names_the_closest_miss(conn):
 
 def test_with_no_options_at_all_it_says_so_without_a_closest_miss(conn):
     assert section(conn, []) == [
-        "Costa Rica: RNO > SJO  Jan 09 - Jan 16", "-- business --", "No affordable award options right now.",
+        "Costa Rica: RNO > SJO  leave Jan 09, return Jan 16", "-- business --", "No affordable award options right now.",
         "Cheapest way to fly: $2,267 (business, cash).", "Alerts sent in the last 7 days: none.",
     ]
 
@@ -277,7 +277,7 @@ def cabins_section(conn, business=(400, 420), business_options=(), economy=(300,
 def test_each_cabin_gets_its_own_block_under_one_trip_header(conn):
     lines = cabins_section(conn)
 
-    assert lines[0] == "Costa Rica: RNO > SJO  Jan 09 - Jan 16"
+    assert lines[0] == "Costa Rica: RNO > SJO  leave Jan 09, return Jan 16"
     assert lines.index("-- economy --") < lines.index("-- business --")
     assert sum(l.startswith("Alerts sent") for l in lines) == 1   # trip-level lines appear once
 
@@ -328,7 +328,7 @@ def test_a_flexible_trip_says_so_in_the_digest_header(conn):
 
     lines = trip_section([analysis_for(trip, [affordable()])], {}, {}, TODAY)
 
-    assert lines[0] == "Costa Rica: RNO > SJO  Jan 09 - Jan 16 (flexible: arrive up to 3 days early, return +/-3)"
+    assert lines[0] == "Costa Rica: RNO > SJO  leave Jan 09, return Jan 16 (flexible: +/-3 days)"
 
 
 # --- trips that compete for the same miles ----------------------------------------------------------------------------

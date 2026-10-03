@@ -62,7 +62,7 @@ def baseline():
 
 def add_trip(conn, **overrides):
     fields = dict(name="Costa Rica", origin="RNO", destination="SJO",
-                  depart_date=JAN9, return_date=JAN16, active=True)
+                  outbound_date=JAN9, return_date=JAN16, active=True)
     trip_id = db.add_trip(conn, **{**fields, **overrides})
     return conn.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
 

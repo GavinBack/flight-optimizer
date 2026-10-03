@@ -13,7 +13,7 @@ from enum import IntEnum
 from flight_optimizer import connections, db
 from flight_optimizer.connections import ConnectionClass
 from flight_optimizer.seats_aero import AwardResult, Cabin, SeatsAeroClient
-from flight_optimizer.windows import date_window, outbound_windows, window_days
+from flight_optimizer.windows import date_window, is_arrival, outbound_windows, window_days
 
 
 # Legs reporting fewer seats than this are treated as unbookable. Set to 0 to keep them.
@@ -264,9 +264,12 @@ def search_trip(
         sources=sources, min_seats=min_seats, window=window_days(trip),
     )
 
-    arrive_on = date.fromisoformat(trip["depart_date"])  # the day to land (see `windows.py`)
-    outbound = search_one_way(client, trip["origin"], trip["destination"], arrive_on, lands_on_date=True, **options)
-    windows = outbound_windows(arrive_on, window_days(trip))
+    outbound_date = date.fromisoformat(trip["outbound_date"])  # the day to leave, or to land (see `windows.py`)
+    arrival = is_arrival(trip)
+    outbound = search_one_way(
+        client, trip["origin"], trip["destination"], outbound_date, lands_on_date=arrival, **options
+    )
+    windows = outbound_windows(outbound_date, window_days(trip)) if arrival else None
     return_trip = None
     if trip["return_date"]:
         return_trip = search_one_way(

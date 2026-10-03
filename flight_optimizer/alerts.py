@@ -114,7 +114,7 @@ def oldest_data(option: TripOption) -> str | None:
 
 
 def _dates(trip: sqlite3.Row) -> str:
-    depart = date.fromisoformat(trip["depart_date"])
+    depart = date.fromisoformat(trip["outbound_date"])
     text = f"{depart:%b %d}"
     if trip["return_date"]:
         text += f" - {date.fromisoformat(trip['return_date']):%b %d}"
@@ -123,7 +123,7 @@ def _dates(trip: sqlite3.Row) -> str:
 
 def travel_dates(trip: sqlite3.Row, option: TripOption) -> str:
     """The option's dates, and the dates asked for when a flexible trip's option is on other days."""
-    actual = option_dates(option)
+    actual = option_dates(option, trip)
     return actual if on_asked_dates(trip, option) else f"{actual} (you asked {_dates(trip)})"
 
 

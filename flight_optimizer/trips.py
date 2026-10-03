@@ -5,7 +5,7 @@ import sqlite3
 from datetime import date
 
 from flight_optimizer import db
-from flight_optimizer.windows import FLEXIBLE_WINDOW_DAYS
+from flight_optimizer.windows import flexibility_label, is_arrival
 
 
 def airport(code: str) -> str:
@@ -29,11 +29,12 @@ def add_trip(
     name: str,
     origin: str,
     destination: str,
-    depart_date: date,
+    outbound_date: date,
     return_date: date | None = None,
     gateways: list[str] | tuple[str, ...] = (),
     active: bool = True,
     flexible: bool = False,
+    date_anchor: str = "depart",
 ) -> int:
     """Validate everything first, then save the trip and its gateways together."""
     if not name.strip():
@@ -41,23 +42,23 @@ def add_trip(
     origin, destination = airport(origin), airport(destination)
     if origin == destination:
         raise ValueError("The origin and destination are the same airport.")
-    if return_date is not None and return_date < depart_date:
-        raise ValueError("The return date is before the departure date.")
+    if return_date is not None and return_date < outbound_date:
+        raise ValueError("The return date is before the outbound date.")
     hubs = list(dict.fromkeys(airport(g) for g in gateways))
     for hub in hubs:
         if hub in (origin, destination):
             raise ValueError(f"Gateway {hub} is the trip's own origin or destination.")
 
     duplicate = conn.execute(
-        "SELECT id FROM trips WHERE origin = ? AND destination = ? AND depart_date = ? AND return_date IS ?",
-        (origin, destination, depart_date.isoformat(), return_date.isoformat() if return_date else None),
+        "SELECT id FROM trips WHERE origin = ? AND destination = ? AND outbound_date = ? AND return_date IS ?",
+        (origin, destination, outbound_date.isoformat(), return_date.isoformat() if return_date else None),
     ).fetchone()
     if duplicate is not None:
         raise ValueError(f"A trip with the same route and dates already exists (trip {duplicate['id']}).")
 
     trip_id = db.add_trip(
-        conn, name=name.strip(), origin=origin, destination=destination, depart_date=depart_date,
-        return_date=return_date, active=active, flexible=flexible,
+        conn, name=name.strip(), origin=origin, destination=destination, outbound_date=outbound_date,
+        return_date=return_date, active=active, flexible=flexible, date_anchor=date_anchor,
     )
     if hubs:
         db.set_gateways(conn, trip_id, hubs)
@@ -68,18 +69,18 @@ def format_trips(conn: sqlite3.Connection) -> str:
     rows = conn.execute("SELECT * FROM trips ORDER BY id").fetchall()
     if not rows:
         return "No trips yet. Add one with: python -m flight_optimizer trip add"
-    lines = [f"{'ID':<4}{'Active':<8}{'Trip':<20}{'Route':<14}{'Arrive - Leave':<26}{'Flexible':<10}Gateways"]
+    lines = [f"{'ID':<4}{'Active':<8}{'Trip':<20}{'Route':<14}{'Dates':<35}{'Flexible':<11}Gateways"]
     for trip in rows:
-        depart = date.fromisoformat(trip["depart_date"])
-        dates = f"{depart:%b %d %Y}"
+        outbound = date.fromisoformat(trip["outbound_date"])
+        dates = f"{'arrive' if is_arrival(trip) else 'leave'} {outbound:%b %d %Y}"
         if trip["return_date"]:
-            dates += f" - {date.fromisoformat(trip['return_date']):%b %d}"
+            dates += f", return {date.fromisoformat(trip['return_date']):%b %d}"
         else:
             dates += " (one way)"
         gateways = ", ".join(db.get_gateways(conn, trip["id"])) or "none"
         lines.append(
             f"{trip['id']:<4}{'yes' if trip['active'] else 'no':<8}{trip['name'][:19]:<20}"
-            f"{trip['origin'] + ' > ' + trip['destination']:<14}{dates:<26}"
-            f"{(f'-{FLEXIBLE_WINDOW_DAYS} / ±{FLEXIBLE_WINDOW_DAYS}') if trip['flexible'] else 'exact':<10}{gateways}"
+            f"{trip['origin'] + ' > ' + trip['destination']:<14}{dates:<35}"
+            f"{flexibility_label(trip):<11}{gateways}"
         )
     return "\n".join(lines)

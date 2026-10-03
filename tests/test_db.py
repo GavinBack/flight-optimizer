@@ -19,7 +19,7 @@ def new_trip(conn, **overrides):
         name="Europe",
         origin="jfk",
         destination="lhr",
-        depart_date=date(2026, 11, 1),
+        outbound_date=date(2026, 11, 1),
         return_date=date(2026, 11, 10),
     )
     return db.add_trip(conn, **{**fields, **overrides})
@@ -41,7 +41,7 @@ def test_trip_fields_are_normalized(conn):
 
     row = conn.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
     assert (row["origin"], row["destination"]) == ("JFK", "LHR")
-    assert (row["depart_date"], row["return_date"]) == ("2026-11-01", "2026-11-10")
+    assert (row["outbound_date"], row["return_date"]) == ("2026-11-01", "2026-11-10")
 
 
 def test_a_trip_has_no_cabin_or_price_limit_columns(conn):
@@ -50,7 +50,7 @@ def test_a_trip_has_no_cabin_or_price_limit_columns(conn):
 
     columns = {row[1] for row in conn.execute("PRAGMA table_info(trips)")}
     assert not columns & {"cabin", "max_miles", "max_cash_price"}
-    assert {"name", "origin", "destination", "depart_date", "return_date", "active", "flexible"} <= columns
+    assert {"name", "origin", "destination", "outbound_date", "return_date", "active", "flexible"} <= columns
 
 
 def test_one_way_trip_has_no_return_date(conn):
@@ -188,7 +188,7 @@ def test_an_older_database_loses_the_retired_columns_and_keeps_its_trips(tmp_pat
     db.init_schema(conn)
 
     (row,) = conn.execute("SELECT * FROM trips").fetchall()
-    assert row["name"] == "Costa Rica" and row["active"] == 1 and row["flexible"] == 1 and row["depart_date"] == "2027-01-09"
+    assert row["name"] == "Costa Rica" and row["active"] == 1 and row["flexible"] == 1 and row["outbound_date"] == "2027-01-09"
     assert not {"cabin", "max_miles", "max_cash_price"} & set(row.keys())
 
 

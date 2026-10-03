@@ -13,6 +13,7 @@ from itertools import product
 from typing import Sequence
 
 from flight_optimizer.itineraries import Freshness, Itinerary, TripSearchResult
+from flight_optimizer.windows import MIN_STAY_NIGHTS
 
 # Seats.aero `source` id -> key used in the balances table.
 SOURCE_TO_PROGRAM = {
@@ -120,8 +121,7 @@ class TripOption:
     @property
     def arrive_date(self) -> date:
         """The day the outbound lands (local), or its last flight's day if times are not known."""
-        last = self.itineraries[0].legs[-1]
-        return last.arrives_at.date() if last.arrives_at is not None else last.date
+        return _lands(self.itineraries[0])
 
     @property
     def return_date(self) -> date | None:
@@ -215,6 +215,12 @@ def _sort_key(option: TripOption, today: date) -> tuple:
     return (1, a.total_shortfall, option.total_miles)
 
 
+def _lands(itinerary: Itinerary) -> date:
+    """The day an itinerary lands (local): its last flight's arrival, or that flight's day if times are unknown."""
+    last = itinerary.legs[-1]
+    return last.arrives_at.date() if last.arrives_at is not None else last.date
+
+
 def rank_trip(
     result: TripSearchResult, balances: dict[str, int], today: date | None = None
 ) -> list[TripOption]:
@@ -234,8 +240,9 @@ def rank_trip(
     options = [
         TripOption(itineraries=combo, affordability=assess(combo, balances))
         for combo in product(*directions)
-        # With flexible dates an outbound can land after a return leaves; that is not a trip.
-        if len(combo) == 1 or combo[1].legs[0].date >= combo[0].legs[-1].date
+        # At least MIN_STAY_NIGHTS between landing and flying home: with flexible dates an outbound can
+        # otherwise land the day the return leaves, or after it.
+        if len(combo) == 1 or (combo[1].legs[0].date - _lands(combo[0])).days >= MIN_STAY_NIGHTS
     ]
     today = today or date.today()
     return sorted(options, key=lambda option: _sort_key(option, today))

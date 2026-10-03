@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -32,6 +32,16 @@ def leg(source, miles, origin="RNO", destination="LAX", *, stops=None, updated="
 
 def trip(*legs, via=None):
     return Itinerary(legs=tuple(legs), via=via)
+
+
+def later(itinerary, days=7):
+    """The same itinerary a week on: a return that leaves after the outbound lands (the minimum stay)."""
+    from dataclasses import replace
+    shift = lambda moment: moment + timedelta(days=days) if moment is not None else None
+    return replace(itinerary, legs=tuple(
+        replace(l, date=l.date + timedelta(days=days), departs_at=shift(l.departs_at), arrives_at=shift(l.arrives_at))
+        for l in itinerary.legs
+    ))
 
 
 def balances(**overrides):
@@ -202,7 +212,7 @@ def test_round_trip_pairs_every_outbound_with_every_return():
     result = TripSearchResult(
         trip_id=1,
         outbound=[trip(leg("delta", 10_000)), trip(leg("delta", 11_000))],
-        return_trip=[trip(leg("aeroplan", 25_000)), trip(leg("aeroplan", 26_000)), trip(leg("aeroplan", 27_000))],
+        return_trip=[later(trip(leg("aeroplan", 25_000))), later(trip(leg("aeroplan", 26_000))), later(trip(leg("aeroplan", 27_000)))],
     )
 
     ranked = rank_trip(result, balances(delta=20_000, capital_one=100_000))
@@ -216,7 +226,7 @@ def test_round_trip_is_assessed_jointly_not_per_direction():
     result = TripSearchResult(
         trip_id=1,
         outbound=[trip(leg("delta", 8_000))],
-        return_trip=[trip(leg("delta", 8_000))],
+        return_trip=[later(trip(leg("delta", 8_000)))],
     )
 
     (option,) = rank_trip(result, balances(delta=14_049))
@@ -261,7 +271,7 @@ def test_within_the_same_self_transfer_count_cheapest_wins():
 
 def test_round_trip_counts_self_transfers_in_both_directions():
     mixed = trip(leg("delta", 5_000), leg("aeroplan", 5_000), via="LAX")
-    result = TripSearchResult(trip_id=1, outbound=[mixed], return_trip=[mixed])
+    result = TripSearchResult(trip_id=1, outbound=[mixed], return_trip=[later(mixed)])
 
     (option,) = rank_trip(result, balances(delta=50_000, capital_one=100_000))
 
@@ -336,7 +346,7 @@ def test_self_transfers_still_outrank_stops_connections_and_price_when_data_is_e
 
 def test_option_penalties_add_up_over_both_directions():
     outbound, back = hub(40_000, stops=2, updated=OLD), hub(40_000, stops=1)
-    result = TripSearchResult(trip_id=1, outbound=[outbound], return_trip=[back])
+    result = TripSearchResult(trip_id=1, outbound=[outbound], return_trip=[later(back)])
 
     (option,) = rank_trip(result, balances(**RICH), today=TODAY)
 
@@ -385,7 +395,7 @@ def test_an_option_is_only_as_current_as_its_stalest_leg():
 
 
 def test_option_freshness_covers_both_directions():
-    result = TripSearchResult(trip_id=1, outbound=[hub(40_000, updated=FRESH)], return_trip=[hub(40_000, updated=OLD)])
+    result = TripSearchResult(trip_id=1, outbound=[hub(40_000, updated=FRESH)], return_trip=[later(hub(40_000, updated=OLD))])
 
     (option,) = rank_trip(result, balances(**RICH), today=TODAY)
 
@@ -428,10 +438,27 @@ def test_a_return_that_leaves_before_the_outbound_arrives_is_not_a_trip():
     assert pairs == [(9, 10), (9, 16), (12, 16)]      # (12, 10) would come home before leaving
 
 
-def test_a_return_on_the_arrival_day_is_allowed():
+def test_a_return_on_the_day_the_outbound_lands_is_not_a_trip():
+    # the owner's minimum stay is one night
     two_leg = trip(on(date(2027, 1, 9), destination="LAX"), on(date(2027, 1, 10), origin="LAX"), via="LAX")
-    back = trip(on(date(2027, 1, 10), origin="SJO", destination="RNO"))
+    same_day = trip(on(date(2027, 1, 10), origin="SJO", destination="RNO"))
+    next_day = trip(on(date(2027, 1, 11), origin="SJO", destination="RNO"))
 
-    ranked = rank_trip(TripSearchResult(trip_id=1, outbound=[two_leg], return_trip=[back]), balances(delta=200_000))
+    ranked = rank_trip(TripSearchResult(trip_id=1, outbound=[two_leg], return_trip=[same_day, next_day]),
+                       balances(delta=200_000))
 
-    assert len(ranked) == 1
+    assert [o.return_date.day for o in ranked] == [11]
+
+
+def test_the_stay_is_counted_from_when_the_outbound_actually_lands():
+    from dataclasses import replace
+    from datetime import datetime
+    # leaves Jan 9 at 22:00, lands after midnight on Jan 10: a return on Jan 10 leaves the same day it lands
+    red_eye = replace(on(date(2027, 1, 9)), departs_at=datetime(2027, 1, 9, 22), arrives_at=datetime(2027, 1, 10, 6))
+    same_day = trip(on(date(2027, 1, 10), origin="SJO", destination="RNO"))
+    next_day = trip(on(date(2027, 1, 11), origin="SJO", destination="RNO"))
+
+    ranked = rank_trip(TripSearchResult(trip_id=1, outbound=[trip(red_eye)], return_trip=[same_day, next_day]),
+                       balances(delta=200_000))
+
+    assert [o.return_date.day for o in ranked] == [11]

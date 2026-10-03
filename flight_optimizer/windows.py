@@ -18,6 +18,7 @@ from datetime import date, timedelta
 
 FLEXIBLE_WINDOW_DAYS = 3  # owner's rule: 3 days either side
 EARLY_DEPARTURE_DAYS = 1  # owner's rule: the outbound may leave this many days before the day it lands
+MIN_STAY_NIGHTS = 1  # owner's rule (2026-10-03): the return leaves at least this many days after the outbound lands
 
 
 def window_days(trip: sqlite3.Row) -> int:

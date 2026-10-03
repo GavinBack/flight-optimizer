@@ -136,7 +136,7 @@ python -m flight_optimizer trip add "Costa Rica" RNO SJO --depart 2027-01-09 --r
 - `--return` is the day the flight home **leaves**.
 - Leave out `--return` for a one-way trip.
 - `--gateways` lists the hub airports to route through. Many small airports have no direct award route, so the app searches through big hubs instead (for example RNO to LAX, then LAX to SJO).
-- `--flexible` searches awards up to 3 days either side of each date. With `--arrive`, that is the day the flight there lands. Cash prices are always checked only for flights leaving on your exact dates.
+- `--flexible` searches awards up to 3 days either side of each date. With `--arrive`, that is the day the flight there lands. Every option includes at least one night at your destination: the flight home never leaves on the day you land. Cash prices are always checked only for flights leaving on your exact dates.
 - `--inactive` saves the trip without searching it yet.
 
 A new trip starts searching at the next report or daily check.

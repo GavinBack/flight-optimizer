@@ -126,7 +126,7 @@ This shows each trip's number, whether it is active, its route, its dates, wheth
 ### Add a trip
 
 ```
-python -m flight_optimizer trip add "Costa Rica" RNO SJO --depart 2027-01-09 --return 2027-01-16 --gateways LAX
+python -m flight_optimizer trip add "Lisbon" BOI LIS --depart 2027-05-08 --return 2027-05-15 --gateways JFK
 ```
 
 - The name comes first, then the airport you leave from, then where you are going.
@@ -135,7 +135,7 @@ python -m flight_optimizer trip add "Costa Rica" RNO SJO --depart 2027-01-09 --r
   - `--arrive` (only if you choose it): the day you must **arrive**. The flight there may leave up to 1 day earlier (an evening or overnight flight), but it must land on that day.
 - `--return` is the day the flight home **leaves**.
 - Leave out `--return` for a one-way trip.
-- `--gateways` lists the hub airports to route through. Many small airports have no direct award route, so the app searches through big hubs instead (for example RNO to LAX, then LAX to SJO).
+- `--gateways` lists the hub airports to route through. Many small airports have no direct award route, so the app searches through big hubs instead (for example BOI to JFK, then JFK to LIS).
 - Each date is exact unless you say otherwise. `--flexible` searches awards up to 3 days either side of both dates; `--flexible-outbound` or `--flexible-return` does it for just one. With `--arrive`, the outbound window is around the day the flight there lands. Every option includes at least one night at your destination: the flight home never leaves on the day you land. Cash prices are always checked only for flights leaving on your exact dates.
 - `--inactive` saves the trip without searching it yet.
 
@@ -144,7 +144,7 @@ A new trip starts searching at the next report or daily check.
 ### Change a trip
 
 ```
-python -m flight_optimizer trip set 1 --depart 2027-01-10 --return 2027-01-17
+python -m flight_optimizer trip set 1 --depart 2027-05-09 --return 2027-05-16
 python -m flight_optimizer trip set 2 --flexible
 python -m flight_optimizer trip set 2 --inactive
 ```
